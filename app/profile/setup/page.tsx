@@ -29,6 +29,9 @@ const cx = (...a: Array<string | false | undefined>) =>
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 const mb = (bytes: number) => bytes / (1024 * 1024);
 
+const BG_IMAGE =
+  "https://sendbird.imgix.net/cms/image2_2024-03-26-214252_jekb.png";
+
 export default function ProfileSetupPage() {
   // form
   const [nickname, setNickname] = useState("");
@@ -94,9 +97,7 @@ export default function ProfileSetupPage() {
     for (const f of Array.from(files).slice(0, roomLeft)) {
       if (!f.type.startsWith("image/")) continue;
       if (mb(f.size) > MAX_IMAGE_MB) {
-        toast.error(
-          `An image was too large (>${MAX_IMAGE_MB}MB) and was skipped.`
-        );
+        toast.error(`An image was too large (>${MAX_IMAGE_MB}MB) and was skipped.`);
         continue;
       }
       next.push({ id: uid(), file: f, url: URL.createObjectURL(f) });
@@ -121,9 +122,7 @@ export default function ProfileSetupPage() {
     for (const f of Array.from(files).slice(0, roomLeft)) {
       if (!f.type.startsWith("video/")) continue;
       if (mb(f.size) > MAX_VIDEO_MB) {
-        toast.error(
-          `A video was too large (>${MAX_VIDEO_MB}MB) and was skipped.`
-        );
+        toast.error(`A video was too large (>${MAX_VIDEO_MB}MB) and was skipped.`);
         continue;
       }
       next.push({ id: uid(), file: f, url: URL.createObjectURL(f) });
@@ -155,8 +154,7 @@ export default function ProfileSetupPage() {
   async function enableLocation() {
     setLocationOn("working");
     try {
-      if (!("geolocation" in navigator))
-        throw new Error("Geolocation unsupported.");
+      if (!("geolocation" in navigator)) throw new Error("Geolocation unsupported.");
       await new Promise<void>((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(
           () => resolve(),
@@ -175,8 +173,7 @@ export default function ProfileSetupPage() {
   async function enableNotifications() {
     setNotifOn("working");
     try {
-      if (!("Notification" in window))
-        throw new Error("Notifications unsupported.");
+      if (!("Notification" in window)) throw new Error("Notifications unsupported.");
       const p = await Notification.requestPermission();
       if (p !== "granted") throw new Error("Denied");
       setNotifOn("done");
@@ -228,47 +225,37 @@ export default function ProfileSetupPage() {
       return;
     }
 
-    // Production behavior: form-data submit to backend
-    // (Abhi demo: just show toast)
     toast.success("Profile saved. Redirecting to chat…");
 
-    // TODO: wire your backend:
-    // const fd = new FormData();
-    // fd.append("nickname", nickname.trim());
-    // fd.append("bio", bio.trim());
-    // if (avatar) fd.append("avatar", avatar.file);
-    // images.forEach(f => fd.append("images", f.file));
-    // videos.forEach(f => fd.append("videos", f.file));
-    // fd.append("permissions", JSON.stringify({ locationOn, notifOn, camOn, micOn }));
-    // await fetch("YOUR_API/profile/setup", { method: "POST", body: fd });
+    // TODO: wire backend via FormData then redirect:
+    // window.location.href = "/chat";
 
-    // redirect
     window.location.href = "/chat";
   }
 
   const summary = useMemo(() => {
     return [
-      {
-        label: "Location",
-        step: locationOn,
-        icon: <MapPin className="h-4 w-4" />,
-      },
-      {
-        label: "Notifications",
-        step: notifOn,
-        icon: <Bell className="h-4 w-4" />,
-      },
+      { label: "Location", step: locationOn, icon: <MapPin className="h-4 w-4" /> },
+      { label: "Notifications", step: notifOn, icon: <Bell className="h-4 w-4" /> },
       { label: "Camera", step: camOn, icon: <Camera className="h-4 w-4" /> },
       { label: "Microphone", step: micOn, icon: <Mic className="h-4 w-4" /> },
     ];
   }, [locationOn, notifOn, camOn, micOn]);
 
   return (
-    <div className="min-h-screen bg-white text-zinc-900">
-      {/* premium purple bg */}
-      <div className="pointer-events-none fixed inset-0 -z-10">
-        <div className="absolute -top-40 left-1/2 h-[560px] w-[560px] -translate-x-1/2 rounded-full bg-purple-500/15 blur-3xl" />
-        <div className="absolute bottom-[-220px] right-[-160px] h-[620px] w-[620px] rounded-full bg-fuchsia-500/10 blur-3xl" />
+    <div className="relative min-h-screen overflow-hidden bg-white text-zinc-900">
+      {/* Landing-style background image + overlays */}
+      <div className="absolute inset-0 -z-10">
+        <Image
+          src={BG_IMAGE}
+          alt="TokBox background"
+          fill
+          priority
+          className="object-cover"
+        />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(168,85,247,0.35),rgba(255,255,255,0.70)_55%,rgba(255,255,255,0.96))]" />
+        <div className="absolute inset-0 bg-gradient-to-b from-purple-900/30 via-white/35 to-white" />
+        <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(168,85,247,0.08)_1px,transparent_1px),linear-gradient(to_bottom,rgba(168,85,247,0.08)_1px,transparent_1px)] bg-[size:72px_72px] opacity-40" />
       </div>
 
       <div className="mx-auto w-full max-w-5xl px-5 py-10">
@@ -321,12 +308,7 @@ export default function ProfileSetupPage() {
                 <div className="flex items-center gap-4">
                   <div className="relative h-16 w-16 overflow-hidden rounded-2xl border border-purple-200 bg-purple-50">
                     {avatar ? (
-                      <Image
-                        src={avatar.url}
-                        alt="avatar"
-                        fill
-                        className="object-cover"
-                      />
+                      <Image src={avatar.url} alt="avatar" fill className="object-cover" />
                     ) : (
                       <div className="grid h-full w-full place-items-center text-xs font-semibold text-purple-700">
                         Photo
@@ -445,9 +427,7 @@ export default function ProfileSetupPage() {
           {/* Right side: permission summary + camera preview */}
           <div className="grid gap-6">
             <div className="rounded-3xl border border-purple-200 bg-white/75 p-6 shadow-sm backdrop-blur">
-              <div className="text-sm font-semibold">
-                Privacy-friendly summary
-              </div>
+              <div className="text-sm font-semibold">Privacy-friendly summary</div>
               <div className="mt-1 text-xs text-zinc-500">
                 We don’t show raw coordinates in UI. Just whether it’s enabled.
               </div>
@@ -476,9 +456,7 @@ export default function ProfileSetupPage() {
             </div>
 
             <div className="rounded-3xl border border-purple-200 bg-white/75 p-6 shadow-sm backdrop-blur">
-              <div className="text-sm font-semibold">
-                Camera preview (optional)
-              </div>
+              <div className="text-sm font-semibold">Camera preview (optional)</div>
               <div className="mt-3 overflow-hidden rounded-2xl border border-purple-200 bg-black">
                 <video
                   ref={camPreviewRef}
@@ -571,13 +549,7 @@ export default function ProfileSetupPage() {
 
 /* ---------------- UI helpers ---------------- */
 
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
       <div className="text-xs font-semibold text-zinc-700">{label}</div>
@@ -591,12 +563,7 @@ function StatusPill({ step }: { step: Step }) {
     "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-semibold";
   if (step === "done")
     return (
-      <span
-        className={cx(
-          base,
-          "border-emerald-200 bg-emerald-50 text-emerald-700"
-        )}
-      >
+      <span className={cx(base, "border-emerald-200 bg-emerald-50 text-emerald-700")}>
         <Check className="h-3.5 w-3.5" /> Enabled
       </span>
     );
@@ -679,12 +646,7 @@ function ThumbGrid({
           {kind === "image" ? (
             <Image src={m.url} alt="preview" fill className="object-cover" />
           ) : (
-            <video
-              src={m.url}
-              className="h-full w-full object-cover"
-              muted
-              playsInline
-            />
+            <video src={m.url} className="h-full w-full object-cover" muted playsInline />
           )}
 
           <button
