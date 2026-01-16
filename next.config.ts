@@ -1,20 +1,29 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // ✅ REST API ko same-origin bana do => cookies reliably work
   async rewrites() {
     return [
+      // ✅ Backend API (production)
       {
         source: "/api/:path*",
-        destination: "http://localhost:8080/:path*",
+        destination: "https://tokbox.nl/:path*",
+      },
+
+      // ✅ uploads proxy (IMPORTANT)
+      {
+        source: "/uploads/:path*",
+        destination: "https://tokbox.nl/uploads/:path*",
       },
     ];
   },
 
-  // ✅ Unsplash images allow (Next/Image 404 fix)
   images: {
     remotePatterns: [
+      // Existing
       { protocol: "https", hostname: "images.unsplash.com", pathname: "/**" },
       { protocol: "https", hostname: "sendbird.imgix.net", pathname: "/**" },
+
+      // ✅ Your hosted backend uploads
+      { protocol: "https", hostname: "tokbox.nl", pathname: "/uploads/**" },
     ],
   },
 };

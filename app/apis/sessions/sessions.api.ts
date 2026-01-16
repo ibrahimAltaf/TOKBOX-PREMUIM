@@ -1,75 +1,57 @@
-const API_BASE =
-  (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080").replace(/\/$/, "");
+// src/apis/sessions/sessions.api.ts
+"use client";
 
-function getOrCreateFingerprint(): string {
-  if (typeof window === "undefined") return "fp-web-1234567890";
+import { fetchJson } from "@/lib/http";
 
-  const key = "tokbox:fingerprint:v1";
-  const existing = window.localStorage.getItem(key);
-  if (existing && existing.trim().length >= 10) return existing.trim();
+export type EnsureSessionBody = {
+  nickname?: string;
+  about?: string;
+  avatarUrl?: string;
+  fingerprint?: string;
+  photos?: string[];
+  introVideoUrl?: string;
+};
 
-  const fp =
-    "fp-" +
-    Math.random().toString(36).slice(2) +
-    "-" +
-    Date.now().toString(36) +
-    "-" +
-    Math.random().toString(36).slice(2);
+export type UpdateMeBody = {
+  nickname?: string;
+  about?: string;
 
-  window.localStorage.setItem(key, fp);
-  return fp;
-}
+  avatarUrl?: string;
+  avatarMediaId?: string;
 
-async function apiFetch(path: string, init?: RequestInit) {
-  const isJsonBody = init?.body && typeof init.body === "string";
+  photos?: string[];
+  photoMediaIds?: string[];
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    credentials: "include",
-    headers: {
-      ...(isJsonBody ? { "Content-Type": "application/json" } : {}),
-      ...(init?.headers || {}),
-    },
-  });
+  introVideoUrl?: string;
+  introVideoMediaId?: string;
+};
 
-  const data = await res.json().catch(() => null);
-
-  // normalize error
-  if (!res.ok || (data && data.ok === false)) {
-    return (
-      data ?? {
-        ok: false,
-        error: "REQUEST_FAILED",
-        status: res.status,
-      }
-    );
-  }
-
-  return data;
-}
-
-export async function ensureSession(body: any) {
-  const payload = {
-    ...(body ?? {}),
-    fingerprint: (body?.fingerprint || getOrCreateFingerprint()).toString(),
-  };
-
-  // ensure fingerprint is >=10, else regenerate
-  if (!payload.fingerprint || payload.fingerprint.trim().length < 10) {
-    payload.fingerprint = getOrCreateFingerprint();
-  }
-
-  return apiFetch("/sessions/ensure", {
+export async function ensureSession(body?: EnsureSessionBody) {
+  return fetchJson<any>("/sessions/ensure", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: body ?? {},
   });
 }
 
 export async function getMe() {
-  return apiFetch("/sessions/me", { method: "GET" });
+  return fetchJson<any>("/sessions/me", { method: "GET" });
 }
 
-export async function getSocketAuth() {
-  // backend: POST /sessions/socket-auth
-  return apiFetch("/sessions/socket-auth", { method: "POST", body: JSON.stringify({}) });
+export async function patchMe(body: UpdateMeBody) {
+  return fetchJson<any>("/sessions/me", { method: "PATCH", body });
+}
+
+export async function deleteMe() {
+  return fetchJson<any>("/sessions/me", { method: "DELETE" });
+}
+
+/**
+ * Backend: POST /sessions/socket-auth => { ok: true, sessionKey }
+ * Used for socket handshake auth fallback (esp cross-site cookie issues).
+ */
+export async function socketAuth() {
+  return fetchJson<{ ok: true; sessionKey: string }>("/sessions/socket-auth", {
+    method: "POST",
+    body: {},
+  });
 }

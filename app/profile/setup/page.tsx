@@ -1,7 +1,8 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
   Bell,
@@ -15,8 +16,15 @@ import {
   X,
 } from "lucide-react";
 
-type MediaItem = { id: string; file: File; url: string };
+import {
+  ensureSession,
+  deleteMe,
+  patchMe,
+} from "../../apis/sessions/sessions.api";
+import { uploadMedia } from "../../apis/media/media.api";
+import { toAbsoluteUrl } from "../../../lib/http";
 
+type MediaItem = { id: string; file: File; url: string };
 type Step = "idle" | "working" | "done" | "error";
 
 const MAX_IMAGES = 8;
@@ -33,6 +41,8 @@ const BG_IMAGE =
   "https://sendbird.imgix.net/cms/image2_2024-03-26-214252_jekb.png";
 
 export default function ProfileSetupPage() {
+  const router = useRouter();
+
   // form
   const [nickname, setNickname] = useState("");
   const [bio, setBio] = useState("");
@@ -42,7 +52,7 @@ export default function ProfileSetupPage() {
   const [images, setImages] = useState<MediaItem[]>([]);
   const [videos, setVideos] = useState<MediaItem[]>([]);
 
-  // permissions summary (privacy friendly)
+  // permissions summary
   const [locationOn, setLocationOn] = useState<Step>("idle");
   const [notifOn, setNotifOn] = useState<Step>("idle");
   const [camOn, setCamOn] = useState<Step>("idle");
@@ -57,9 +67,48 @@ export default function ProfileSetupPage() {
 
   const nicknameOk = nickname.trim().length >= 2;
 
+  /**
+   * ✅ INIT RULES (as you asked)
+   * - When user comes to this page: delete old session (best-effort).
+   * - DO NOT create a "guest" session.
+   * - Only create a new session if needed (cookie missing) by calling ensureSession() without forcing "guest".
+   */
   useEffect(() => {
-    // cleanup object urls + stream
+    let cancelled = false;
+
+    (async () => {
+      const t = toast.loading("Preparing session...");
+      try {
+        // 1) always attempt to delete any previous session
+        try {
+          await deleteMe();
+        } catch {}
+
+        // 2) ensure there is an active session cookie if backend requires it
+        // If your backend returns ok false when no session exists,
+        // ensureSession will create one (anonymous) WITHOUT "guest" forcing.
+        try {
+          await ensureSession({
+            // IMPORTANT: do NOT force nickname "guest"
+            nickname: undefined as any,
+            about: undefined as any,
+            fingerprint: `fp_${uid()}`,
+          });
+        } catch {
+          // if ensureSession is strict about schema, you can remove nickname/about entirely in your API layer
+        }
+
+        if (!cancelled) toast.success("Ready.", { id: t });
+      } catch (e: any) {
+        if (!cancelled)
+          toast.error(e?.error?.message || "Session init failed.", { id: t });
+      }
+    })();
+
     return () => {
+      cancelled = true;
+
+      // cleanup object urls + stream
       if (avatar) URL.revokeObjectURL(avatar.url);
       images.forEach((m) => URL.revokeObjectURL(m.url));
       videos.forEach((m) => URL.revokeObjectURL(m.url));
@@ -97,7 +146,9 @@ export default function ProfileSetupPage() {
     for (const f of Array.from(files).slice(0, roomLeft)) {
       if (!f.type.startsWith("image/")) continue;
       if (mb(f.size) > MAX_IMAGE_MB) {
-        toast.error(`An image was too large (>${MAX_IMAGE_MB}MB) and was skipped.`);
+        toast.error(
+          `An image was too large (>${MAX_IMAGE_MB}MB) and was skipped.`
+        );
         continue;
       }
       next.push({ id: uid(), file: f, url: URL.createObjectURL(f) });
@@ -122,7 +173,9 @@ export default function ProfileSetupPage() {
     for (const f of Array.from(files).slice(0, roomLeft)) {
       if (!f.type.startsWith("video/")) continue;
       if (mb(f.size) > MAX_VIDEO_MB) {
-        toast.error(`A video was too large (>${MAX_VIDEO_MB}MB) and was skipped.`);
+        toast.error(
+          `A video was too large (>${MAX_VIDEO_MB}MB) and was skipped.`
+        );
         continue;
       }
       next.push({ id: uid(), file: f, url: URL.createObjectURL(f) });
@@ -154,7 +207,8 @@ export default function ProfileSetupPage() {
   async function enableLocation() {
     setLocationOn("working");
     try {
-      if (!("geolocation" in navigator)) throw new Error("Geolocation unsupported.");
+      if (!("geolocation" in navigator))
+        throw new Error("Geolocation unsupported.");
       await new Promise<void>((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(
           () => resolve(),
@@ -173,7 +227,8 @@ export default function ProfileSetupPage() {
   async function enableNotifications() {
     setNotifOn("working");
     try {
-      if (!("Notification" in window)) throw new Error("Notifications unsupported.");
+      if (!("Notification" in window))
+        throw new Error("Notifications unsupported.");
       const p = await Notification.requestPermission();
       if (p !== "granted") throw new Error("Denied");
       setNotifOn("done");
@@ -219,24 +274,100 @@ export default function ProfileSetupPage() {
     if (camPreviewRef.current) camPreviewRef.current.srcObject = null;
   }
 
+  // ✅ SAVE + REDIRECT
   async function saveProfile() {
     if (!nicknameOk) {
       toast.error("Nickname is required (min 2 characters).");
       return;
     }
 
-    toast.success("Profile saved. Redirecting to chat…");
+    const loadingId = toast.loading("Saving profile...");
 
-    // TODO: wire backend via FormData then redirect:
-    // window.location.href = "/chat";
+    try {
+      // 1) Upload avatar (optional)
+      let avatarUrl: string | undefined;
+      let avatarMediaId: string | undefined;
 
-    window.location.href = "/chat";
+      if (avatar?.file) {
+        const up = await uploadMedia({
+          folder: "profiles/avatar",
+          files: [avatar.file],
+        });
+        const f = up.files?.[0];
+        avatarUrl = toAbsoluteUrl(f?.url);
+        avatarMediaId = f?.id;
+      }
+
+      // 2) Upload photos gallery (optional)
+      let photos: string[] | undefined;
+      let photoMediaIds: string[] | undefined;
+
+      if (images.length) {
+        const up = await uploadMedia({
+          folder: "profiles/photos",
+          files: images.map((x) => x.file),
+        });
+
+        photos = (up.files ?? [])
+          .map((x: any) => toAbsoluteUrl(x.url))
+          .filter(Boolean) as string[];
+
+        photoMediaIds = (up.files ?? []).map((x: any) => x.id).filter(Boolean);
+      }
+
+      // 3) Upload intro video (optional: use first)
+      let introVideoUrl: string | undefined;
+      let introVideoMediaId: string | undefined;
+
+      if (videos.length) {
+        const up = await uploadMedia({
+          folder: "profiles/videos",
+          files: [videos[0].file],
+        });
+        const f = up.files?.[0];
+        introVideoUrl = toAbsoluteUrl(f?.url);
+        introVideoMediaId = f?.id;
+      }
+
+      // 4) Patch session profile
+      await patchMe({
+        nickname: nickname.trim(),
+        about: bio.trim() || undefined,
+
+        ...(avatarUrl ? { avatarUrl } : {}),
+        ...(avatarMediaId ? { avatarMediaId } : {}),
+
+        ...(photos?.length ? { photos } : {}),
+        ...(photoMediaIds?.length ? { photoMediaIds } : {}),
+
+        ...(introVideoUrl ? { introVideoUrl } : {}),
+        ...(introVideoMediaId ? { introVideoMediaId } : {}),
+      });
+
+      toast.success("Profile saved ✅", { id: loadingId });
+
+      // ✅ redirect to chat
+      router.replace("/chat");
+    } catch (e: any) {
+      const msg = e?.error?.fieldErrors
+        ? JSON.stringify(e.error.fieldErrors)
+        : e?.error?.message || e?.message || "Failed to save.";
+      toast.error(msg, { id: loadingId });
+    }
   }
 
   const summary = useMemo(() => {
     return [
-      { label: "Location", step: locationOn, icon: <MapPin className="h-4 w-4" /> },
-      { label: "Notifications", step: notifOn, icon: <Bell className="h-4 w-4" /> },
+      {
+        label: "Location",
+        step: locationOn,
+        icon: <MapPin className="h-4 w-4" />,
+      },
+      {
+        label: "Notifications",
+        step: notifOn,
+        icon: <Bell className="h-4 w-4" />,
+      },
       { label: "Camera", step: camOn, icon: <Camera className="h-4 w-4" /> },
       { label: "Microphone", step: micOn, icon: <Mic className="h-4 w-4" /> },
     ];
@@ -244,7 +375,7 @@ export default function ProfileSetupPage() {
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-white text-zinc-900">
-      {/* Landing-style background image + overlays */}
+      {/* background */}
       <div className="absolute inset-0 -z-10">
         <Image
           src={BG_IMAGE}
@@ -283,7 +414,6 @@ export default function ProfileSetupPage() {
           {/* Form */}
           <div className="rounded-3xl border border-purple-200 bg-white/75 p-6 shadow-sm backdrop-blur">
             <div className="grid gap-5">
-              {/* nickname */}
               <Field label="Nickname (required)">
                 <input
                   value={nickname}
@@ -293,7 +423,6 @@ export default function ProfileSetupPage() {
                 />
               </Field>
 
-              {/* bio */}
               <Field label="Bio (optional)">
                 <textarea
                   value={bio}
@@ -303,12 +432,16 @@ export default function ProfileSetupPage() {
                 />
               </Field>
 
-              {/* avatar */}
               <Field label="Profile photo (optional)">
                 <div className="flex items-center gap-4">
                   <div className="relative h-16 w-16 overflow-hidden rounded-2xl border border-purple-200 bg-purple-50">
                     {avatar ? (
-                      <Image src={avatar.url} alt="avatar" fill className="object-cover" />
+                      <Image
+                        src={avatar.url}
+                        alt="avatar"
+                        fill
+                        className="object-cover"
+                      />
                     ) : (
                       <div className="grid h-full w-full place-items-center text-xs font-semibold text-purple-700">
                         Photo
@@ -350,7 +483,6 @@ export default function ProfileSetupPage() {
                 </div>
               </Field>
 
-              {/* uploads */}
               <div className="grid gap-4 md:grid-cols-2">
                 <Field label={`Images (optional) • up to ${MAX_IMAGES}`}>
                   <label className="inline-flex w-full cursor-pointer items-center justify-center gap-2 rounded-2xl border border-purple-200 bg-white px-4 py-3 text-sm font-semibold text-purple-700 hover:bg-purple-50">
@@ -397,7 +529,6 @@ export default function ProfileSetupPage() {
                 </Field>
               </div>
 
-              {/* actions */}
               <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <button
                   type="button"
@@ -410,7 +541,7 @@ export default function ProfileSetupPage() {
                       : "cursor-not-allowed bg-zinc-300"
                   )}
                 >
-                  Save & Continue
+                  Save
                 </button>
 
                 <button
@@ -424,10 +555,12 @@ export default function ProfileSetupPage() {
             </div>
           </div>
 
-          {/* Right side: permission summary + camera preview */}
+          {/* Right side */}
           <div className="grid gap-6">
             <div className="rounded-3xl border border-purple-200 bg-white/75 p-6 shadow-sm backdrop-blur">
-              <div className="text-sm font-semibold">Privacy-friendly summary</div>
+              <div className="text-sm font-semibold">
+                Privacy-friendly summary
+              </div>
               <div className="mt-1 text-xs text-zinc-500">
                 We don’t show raw coordinates in UI. Just whether it’s enabled.
               </div>
@@ -456,7 +589,9 @@ export default function ProfileSetupPage() {
             </div>
 
             <div className="rounded-3xl border border-purple-200 bg-white/75 p-6 shadow-sm backdrop-blur">
-              <div className="text-sm font-semibold">Camera preview (optional)</div>
+              <div className="text-sm font-semibold">
+                Camera preview (optional)
+              </div>
               <div className="mt-3 overflow-hidden rounded-2xl border border-purple-200 bg-black">
                 <video
                   ref={camPreviewRef}
@@ -549,7 +684,13 @@ export default function ProfileSetupPage() {
 
 /* ---------------- UI helpers ---------------- */
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
   return (
     <div>
       <div className="text-xs font-semibold text-zinc-700">{label}</div>
@@ -563,7 +704,12 @@ function StatusPill({ step }: { step: Step }) {
     "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-semibold";
   if (step === "done")
     return (
-      <span className={cx(base, "border-emerald-200 bg-emerald-50 text-emerald-700")}>
+      <span
+        className={cx(
+          base,
+          "border-emerald-200 bg-emerald-50 text-emerald-700"
+        )}
+      >
         <Check className="h-3.5 w-3.5" /> Enabled
       </span>
     );
@@ -646,7 +792,12 @@ function ThumbGrid({
           {kind === "image" ? (
             <Image src={m.url} alt="preview" fill className="object-cover" />
           ) : (
-            <video src={m.url} className="h-full w-full object-cover" muted playsInline />
+            <video
+              src={m.url}
+              className="h-full w-full object-cover"
+              muted
+              playsInline
+            />
           )}
 
           <button

@@ -1,0 +1,167 @@
+// app/realtime/socket.client.ts
+"use client";
+
+import { io, type Socket } from "socket.io-client";
+import {
+  getChatState,
+  pushDmMessage,
+  pushRoomMessage,
+  setChatState,
+} from "../store/chat.store";
+
+let sock: Socket | null = null;
+let bound = false;
+
+// ✅ session key cache (cookie fallback + explicit key)
+let socketSessionKey: string | null = null;
+
+function playTone() {
+  try {
+    const a = new Audio("/sounds/notify.mp3");
+    a.volume = 0.85;
+    a.play().catch(() => {});
+  } catch {}
+}
+
+function browserNotify(title: string, body?: string) {
+  try {
+    if (typeof window === "undefined") return;
+    if (!("Notification" in window)) return;
+
+    if (Notification.permission === "granted") {
+      new Notification(title, body ? { body } : undefined);
+      return;
+    }
+    if (Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+  } catch {}
+}
+
+function shouldAlert(kind: "DM" | "ROOM", key: string) {
+  const s = getChatState();
+  if (kind === "DM" && s.mode === "DM" && s.activeThreadId === key)
+    return false;
+  if (kind === "ROOM" && s.mode === "ROOM" && s.activeRoomId === key)
+    return false;
+  return true;
+}
+
+function bindOnce(s: Socket) {
+  if (bound) return;
+  bound = true;
+
+  s.on("connect", () => {
+    // useful for debugging
+    // console.log("[socket] connected", s.id);
+  });
+
+  s.on("connect_error", (err: any) => {
+    // console.log("[socket] connect_error", err?.message || err);
+  });
+
+  s.on("dm:new", ({ threadId, message }) => {
+    const tid = String(threadId);
+    pushDmMessage(tid, message);
+
+    if (shouldAlert("DM", tid)) {
+      playTone();
+      browserNotify("New DM", message?.text || "New message");
+    }
+  });
+
+  s.on("msg:new", ({ roomId, message }) => {
+    const rid = String(roomId);
+    pushRoomMessage(rid, message);
+
+    if (shouldAlert("ROOM", rid)) {
+      playTone();
+      browserNotify("New room message", message?.text || "New message");
+    }
+  });
+
+  s.on("typing:update", ({ roomId, sessionId, isTyping }) => {
+    setChatState((st) => ({
+      typingByRoom: {
+        ...st.typingByRoom,
+        [roomId]: {
+          ...(st.typingByRoom[roomId] ?? {}),
+          [sessionId]: !!isTyping,
+        },
+      },
+    }));
+  });
+
+  s.on("presence:update", ({ roomId, sessionIds }) => {
+    setChatState((st) => ({
+      presenceByRoom: { ...st.presenceByRoom, [roomId]: sessionIds ?? [] },
+    }));
+  });
+
+  // calling
+  s.on("call:ring", ({ callId, fromSessionId, roomId }) => {
+    setChatState({ incomingCall: { callId, fromSessionId, roomId } });
+    playTone();
+    browserNotify("Incoming call", `From ${String(fromSessionId).slice(0, 6)}`);
+  });
+
+  s.on("call:ended", ({ callId }) => {
+    setChatState((st) => {
+      if (st.incomingCall?.callId === callId) return { incomingCall: null };
+      return {};
+    });
+  });
+}
+
+/**
+ * ✅ Allow app to set sessionKey for socket auth
+ * You can call this after `getSocketAuthKey()` API.
+ */
+export function setSocketSessionKey(key: string | null | undefined) {
+  socketSessionKey = key ? String(key) : null;
+
+  // If socket already exists, update auth and reconnect
+  if (sock) {
+    try {
+      // socket.io supports updating auth before reconnect
+      sock.auth = { ...(sock.auth as any), sessionKey: socketSessionKey };
+      sock.disconnect();
+      sock.connect();
+    } catch {}
+  }
+}
+
+/**
+ * Create and return socket singleton (connects if needed)
+ */
+export function connectSocket(): Socket {
+  if (sock) return sock;
+
+  const url =
+    process.env.NEXT_PUBLIC_SOCKET_URL ||
+    process.env.NEXT_PUBLIC_API_URL ||
+    "https://tokbox.nl";
+
+  sock = io(url, {
+    transports: ["websocket"],
+    withCredentials: true,
+
+    // ✅ send key (backend can read from socket.handshake.auth.sessionKey)
+    auth: socketSessionKey ? { sessionKey: socketSessionKey } : undefined,
+  });
+
+  bindOnce(sock);
+  return sock;
+}
+
+export function getSocket() {
+  return sock;
+}
+
+export function resetSocket() {
+  try {
+    sock?.disconnect();
+  } catch {}
+  sock = null;
+  bound = false;
+}

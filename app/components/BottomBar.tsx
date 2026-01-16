@@ -1,31 +1,23 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import {
-  Bell,
-  Camera,
-  CirclePlay,
-  Send,
-  X,
-  Minus,
-  RefreshCcw,
-  Mic,
-  MicOff,
-  Maximize2,
-} from "lucide-react";
-import { useChat } from "../chat/_state/chat.context";
+import React, { useEffect, useRef, useState } from "react";
+import { Bell, Camera, CirclePlay, Send } from "lucide-react";
+
+import { subscribeChat, getChatState } from "../store/chat.store";
+import { connectSocket } from "../realtime/socket.client";
 
 const cx = (...a: Array<string | false | undefined>) =>
   a.filter(Boolean).join(" ");
 
 type CamStep = "idle" | "starting" | "ready" | "error";
+type Mode = "DM" | "ROOM";
 
 export default function BottomBar() {
   const [text, setText] = useState("");
+  const [s, setS] = useState(getChatState());
 
-  const { mode, sendDm, sendRoomMessage, typingStart, typingStop } = useChat();
+  useEffect(() => subscribeChat(setS), []);
 
-  // floating camera state
   const [camOpen, setCamOpen] = useState(false);
   const [minimized, setMinimized] = useState(false);
 
@@ -33,17 +25,16 @@ export default function BottomBar() {
   const [micOn, setMicOn] = useState(true);
   const [camStep, setCamStep] = useState<CamStep>("idle");
 
-  // position
   const [pos, setPos] = useState({ x: 24, y: 92 });
 
-  const dragRef = useRef<{
-    dragging: boolean;
-    startX: number;
-    startY: number;
-    baseX: number;
-    baseY: number;
-    pointerId?: number;
-  }>({ dragging: false, startX: 0, startY: 0, baseX: 0, baseY: 0 });
+  const dragRef = useRef({
+    dragging: false,
+    startX: 0,
+    startY: 0,
+    baseX: 0,
+    baseY: 0,
+    pointerId: undefined as number | undefined,
+  });
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -58,10 +49,7 @@ export default function BottomBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [camOpen, facingMode, micOn]);
 
-  useEffect(() => {
-    return () => stopStream();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => () => stopStream(), []);
 
   async function startStream() {
     setCamStep("starting");
@@ -95,14 +83,6 @@ export default function BottomBar() {
     if (videoRef.current) videoRef.current.srcObject = null;
   }
 
-  function toggleFacing() {
-    setFacingMode((p) => (p === "user" ? "environment" : "user"));
-  }
-
-  function toggleMic() {
-    setMicOn((p) => !p);
-  }
-
   function openCam() {
     setCamOpen(true);
     setMinimized(false);
@@ -114,7 +94,6 @@ export default function BottomBar() {
     setMinimized(false);
   }
 
-  // drag
   function onPointerDown(e: React.PointerEvent) {
     dragRef.current.dragging = true;
     dragRef.current.pointerId = e.pointerId;
@@ -160,29 +139,18 @@ export default function BottomBar() {
     const msg = text.trim();
     if (!msg) return;
 
-    try {
-      if (mode === "DM") {
-        await sendDm(msg);
-        setText("");
-        return;
-      }
-      await sendRoomMessage(msg);
+    const sock = connectSocket();
+
+    if (s.mode === "DM") {
+      if (!s.activeThreadId) return;
+      sock.emit("dm:send", { threadId: s.activeThreadId, text: msg });
       setText("");
-      typingStop();
-    } catch (e: any) {
-      // keep minimal
-      console.error(e?.message ?? e);
+      return;
     }
-  }
 
-  // typing debounce (room only)
-  function onType(v: string) {
-    setText(v);
-    if (mode !== "ROOM") return;
-
-    typingStart();
-    (window as any).__typingT && clearTimeout((window as any).__typingT);
-    (window as any).__typingT = setTimeout(() => typingStop(), 900);
+    if (!s.activeRoomId) return;
+    sock.emit("msg:send", { roomId: s.activeRoomId, text: msg });
+    setText("");
   }
 
   return (
@@ -212,9 +180,11 @@ export default function BottomBar() {
                 <Camera className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
                 <input
                   value={text}
-                  onChange={(e) => onType(e.target.value)}
+                  onChange={(e) => setText(e.target.value)}
                   className="h-11 w-full rounded-full bg-white px-11 pr-12 text-sm text-zinc-900 outline-none ring-1 ring-black/5 placeholder:text-zinc-400 focus:ring-2 focus:ring-white/40"
-                  placeholder={mode === "DM" ? "Type DM..." : "Type room message..."}
+                  placeholder={
+                    s.mode === "DM" ? "Type DM..." : "Type room message..."
+                  }
                 />
                 <button
                   type="button"
@@ -237,7 +207,6 @@ export default function BottomBar() {
         </div>
       </footer>
 
-      {/* Floating Camera */}
       {camOpen && (
         <div className="fixed z-[60]" style={{ left: pos.x, top: pos.y }}>
           <div
@@ -270,48 +239,35 @@ export default function BottomBar() {
               </div>
 
               <div className="flex items-center gap-1">
-                {!minimized ? (
-                  <MiniBtn
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setMinimized(true);
-                    }}
-                    label="Minimize"
-                  >
-                    <Minus className="h-4 w-4" />
-                  </MiniBtn>
-                ) : (
-                  <MiniBtn
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setMinimized(false);
-                    }}
-                    label="Restore"
-                  >
-                    <Maximize2 className="h-4 w-4" />
-                  </MiniBtn>
-                )}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMinimized((p) => !p);
+                  }}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-white/10 text-white hover:bg-white/15"
+                >
+                  {minimized ? "+" : "–"}
+                </button>
 
-                <MiniBtn
+                <button
+                  type="button"
                   onClick={(e) => {
                     e.stopPropagation();
                     closeCam();
                   }}
-                  label="Close"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-white/10 text-white hover:bg-white/15"
                 >
-                  <X className="h-4 w-4" />
-                </MiniBtn>
+                  ×
+                </button>
               </div>
             </div>
 
             {minimized ? (
               <div className="px-3 pb-3">
                 <div className="flex items-center justify-between rounded-2xl bg-white/10 px-3 py-2">
-                  <div className="flex items-center gap-2 text-white/90">
-                    <Camera className="h-4 w-4" />
-                    <div className="text-[11px] font-semibold">
-                      Live camera running
-                    </div>
+                  <div className="text-[11px] font-semibold text-white/90">
+                    Live camera running
                   </div>
                   <div className="text-[10px] font-semibold text-white/70">
                     Drag me
@@ -327,51 +283,36 @@ export default function BottomBar() {
                     muted={!micOn}
                     className="h-[210px] w-full object-cover"
                   />
-                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/25 via-transparent to-black/35" />
-
-                  {camStep === "starting" && (
-                    <div className="absolute inset-0 grid place-items-center">
-                      <div className="rounded-2xl bg-white/10 px-3 py-2 text-xs font-semibold text-white backdrop-blur">
-                        Opening camera…
-                      </div>
-                    </div>
-                  )}
-
-                  {camStep === "error" && (
-                    <div className="absolute inset-0 grid place-items-center p-4 text-center">
-                      <div className="rounded-2xl border border-white/15 bg-white/10 px-4 py-3 text-white backdrop-blur">
-                        <div className="text-xs font-semibold">
-                          Camera not available
-                        </div>
-                        <div className="mt-1 text-[11px] text-white/80">
-                          Check permissions / HTTPS.
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
 
                 <div className="flex items-center justify-between gap-2 px-3 py-3">
-                  <div className="flex items-center gap-2">
-                    <ControlBtn onClick={toggleFacing}>
-                      <RefreshCcw className="h-4 w-4" />
-                      Switch
-                    </ControlBtn>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFacingMode((p) =>
+                        p === "user" ? "environment" : "user"
+                      )
+                    }
+                    className="inline-flex items-center gap-2 rounded-2xl bg-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-white/15"
+                  >
+                    Switch
+                  </button>
 
-                    <ControlBtn onClick={toggleMic}>
-                      {micOn ? (
-                        <Mic className="h-4 w-4" />
-                      ) : (
-                        <MicOff className="h-4 w-4" />
-                      )}
-                      {micOn ? "Mic" : "Muted"}
-                    </ControlBtn>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setMicOn((p) => !p)}
+                    className="inline-flex items-center gap-2 rounded-2xl bg-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-white/15"
+                  >
+                    {micOn ? "Mic" : "Muted"}
+                  </button>
 
-                  <ControlBtn onClick={startStream} className="bg-white/15">
-                    <Camera className="h-4 w-4" />
+                  <button
+                    type="button"
+                    onClick={startStream}
+                    className="inline-flex items-center gap-2 rounded-2xl bg-white/15 px-3 py-2 text-xs font-semibold text-white hover:bg-white/20"
+                  >
                     Refresh
-                  </ControlBtn>
+                  </button>
                 </div>
               </>
             )}
@@ -379,49 +320,5 @@ export default function BottomBar() {
         </div>
       )}
     </>
-  );
-}
-
-function MiniBtn({
-  children,
-  onClick,
-  label,
-}: {
-  children: React.ReactNode;
-  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={label}
-      className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-white/10 text-white hover:bg-white/15"
-    >
-      {children}
-    </button>
-  );
-}
-
-function ControlBtn({
-  children,
-  onClick,
-  className,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  className?: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cx(
-        "inline-flex items-center gap-2 rounded-2xl bg-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-white/15",
-        className
-      )}
-    >
-      {children}
-    </button>
   );
 }
