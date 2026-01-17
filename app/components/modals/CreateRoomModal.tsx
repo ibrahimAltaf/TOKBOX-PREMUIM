@@ -1,11 +1,20 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
 import { connectSocket } from "../../realtime/socket.client";
-import { getChatState, setChatState } from "../../store/chat.store";
+import { getChatState, setChatState, subscribeChat } from "../../store/chat.store";
 
 const cx = (...a: Array<string | false | undefined>) => a.filter(Boolean).join(" ");
+
+type RoomLite = { id: string; name?: string; memberIds?: string[] };
+
+type RoomCreateAck =
+  | { ok: true; roomId?: string; id?: string; room?: { id?: string; _id?: string; name?: string; memberIds?: string[] } }
+  | { ok: false; error?: any }
+  | any;
+
+type RoomCreatePayload = { name: string; memberIds: string[] };
 
 export default function CreateRoomModal({
   open,
@@ -14,76 +23,145 @@ export default function CreateRoomModal({
   open: boolean;
   onClose: () => void;
 }) {
-  const s = getChatState();
+  // ✅ reactive state (instead of snapshot getChatState())
+  const [s, setS] = useState(() => getChatState());
+
   const [name, setName] = useState("");
   const [picked, setPicked] = useState<Record<string, boolean>>({});
 
+  useEffect(() => subscribeChat((next) => setS(next)), []);
+
+  // reset on open/close
+  useEffect(() => {
+    if (!open) {
+      setName("");
+      setPicked({});
+    }
+  }, [open]);
+
   const users = s.onlineUsers ?? [];
-  const memberIds = useMemo(
-    () => Object.entries(picked).filter(([, v]) => v).map(([k]) => k),
-    [picked]
-  );
+
+  const memberIds = useMemo(() => {
+    const pickedIds = Object.entries(picked)
+      .filter(([, v]) => v)
+      .map(([k]) => String(k));
+
+    // ✅ ensure creator included (if we have meSessionId)
+    const me = s.meSessionId ? String(s.meSessionId) : null;
+    const all = me ? [me, ...pickedIds] : pickedIds;
+
+    // ✅ unique
+    return Array.from(new Set(all)).filter(Boolean);
+  }, [picked, s.meSessionId]);
 
   if (!open) return null;
 
   function toggle(id: string) {
-    setPicked((p) => ({ ...p, [id]: !p[id] }));
+    const key = String(id);
+    setPicked((p) => ({ ...p, [key]: !p[key] }));
+  }
+
+  function upsertRoomLocal(room: RoomLite) {
+    setChatState((st: any) => {
+      const prev: RoomLite[] = (st.rooms ?? []).map((r: any) => ({
+        id: String(r.id),
+        name: r.name,
+        memberIds: r.memberIds,
+      }));
+
+      const exists = prev.some((r) => String(r.id) === String(room.id));
+      const nextRooms = exists
+        ? prev.map((r) => (String(r.id) === String(room.id) ? { ...r, ...room } : r))
+        : [...prev, room];
+
+      return { rooms: nextRooms };
+    });
   }
 
   async function createRoom() {
     const roomName = name.trim();
     if (!roomName) return;
 
+    // ✅ prevent empty member list
+    if (memberIds.length === 0) return;
+
     const sock = connectSocket();
 
-    // Expect backend to respond (recommended). If not, we create a local optimistic room id.
-    const optimisticId = `room_${Math.random().toString(36).slice(2)}`;
+    // optimistic id (stable)
+    const optimisticId = `room_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    // ✅ optimistic upsert + switch UI immediately
+    const optimisticRoom: RoomLite = { id: optimisticId, name: roomName, memberIds };
+    upsertRoomLocal(optimisticRoom);
+
+    setChatState({
+      mode: "ROOM",
+      activeRoomId: optimisticId,
+      activeRoomName: roomName,
+      activePeerId: null,
+      activeThreadId: null,
+    } as any);
+
+    // ✅ join optimistic
+    try {
+      sock.emit("room:join" as any, { roomId: optimisticId });
+    } catch {}
+
+    // ✅ now request backend create (typed-safe via `as any` because socket.types doesn't include room:create yet)
+    let acked = false;
 
     try {
-      sock.emit("room:create", { name: roomName, memberIds }, (ack: any) => {
-        const roomId = String(ack?.roomId ?? ack?.id ?? optimisticId);
+      sock.emit("room:create" as any, { name: roomName, memberIds } satisfies RoomCreatePayload, (ack: RoomCreateAck) => {
+        acked = true;
 
-        const nextRoom = { id: roomId, name: roomName, memberIds };
+        const serverRoomId =
+          String(ack?.roomId ?? ack?.id ?? ack?.room?.id ?? ack?.room?._id ?? "") || null;
 
-        setChatState((st: any) => ({
-          rooms: [...(st.rooms ?? []), nextRoom],
-          mode: "ROOM",
-          activeRoomId: roomId,
-          activeRoomName: roomName,
-          activePeerId: null,
-          activeThreadId: null,
-        }));
+        if (!serverRoomId) {
+          // backend didn't provide id; keep optimistic
+          onClose();
+          return;
+        }
 
+        // ✅ replace optimistic room id with server id (avoid duplicates)
+        setChatState((st: any) => {
+          const prev: any[] = st.rooms ?? [];
+          const nextRooms = prev.map((r: any) =>
+            String(r.id) === String(optimisticId)
+              ? { ...r, id: serverRoomId, name: roomName, memberIds }
+              : r
+          );
+
+          // if somehow optimistic not found, upsert it
+          const found = nextRooms.some((r: any) => String(r.id) === String(serverRoomId));
+          const finalRooms = found ? nextRooms : [...nextRooms, { id: serverRoomId, name: roomName, memberIds }];
+
+          return {
+            rooms: finalRooms,
+            mode: "ROOM",
+            activeRoomId: serverRoomId,
+            activeRoomName: roomName,
+            activePeerId: null,
+            activeThreadId: null,
+          };
+        });
+
+        // ✅ join real server room
         try {
-          sock.emit("room:join", { roomId });
+          sock.emit("room:join" as any, { roomId: serverRoomId });
         } catch {}
 
         onClose();
       });
-
-      // If no ack is sent, still proceed after short delay (best-effort)
-      setTimeout(() => {
-        const st: any = getChatState();
-        const exists = (st.rooms ?? []).some((r: any) => r.name === roomName);
-        if (exists) return;
-
-        const nextRoom = { id: optimisticId, name: roomName, memberIds };
-        setChatState((x: any) => ({
-          rooms: [...(x.rooms ?? []), nextRoom],
-          mode: "ROOM",
-          activeRoomId: optimisticId,
-          activeRoomName: roomName,
-          activePeerId: null,
-          activeThreadId: null,
-        }));
-        try {
-          sock.emit("room:join", { roomId: optimisticId });
-        } catch {}
-        onClose();
-      }, 450);
     } catch {
       // swallow
     }
+
+    // ✅ fallback: if no ack within time, just close (do NOT create duplicate)
+    window.setTimeout(() => {
+      if (acked) return;
+      onClose();
+    }, 900);
   }
 
   return (
@@ -123,35 +201,47 @@ export default function CreateRoomModal({
                   No users online.
                 </div>
               ) : (
-                users.map((u: any) => (
-                  <button
-                    key={u.id}
-                    type="button"
-                    onClick={() => toggle(String(u.id))}
-                    className={cx(
-                      "flex w-full items-center justify-between rounded-2xl border px-3 py-2 text-left text-sm",
-                      picked[String(u.id)]
-                        ? "border-purple-300 bg-purple-50"
-                        : "border-zinc-200 bg-white hover:bg-zinc-50"
-                    )}
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate text-[13px] font-semibold text-zinc-900">
-                        {u.nickname ?? "Anonymous"}
-                      </div>
-                      <div className="truncate text-[11px] text-zinc-500">{u.about ?? "—"}</div>
-                    </div>
-                    <div
-                      className={cx(
-                        "rounded-full px-2 py-1 text-[10px] font-bold",
-                        picked[String(u.id)] ? "bg-purple-700 text-white" : "bg-zinc-100 text-zinc-700"
-                      )}
-                    >
-                      {picked[String(u.id)] ? "Added" : "Add"}
-                    </div>
-                  </button>
-                ))
+                users
+                  // ✅ optionally hide self if you want (since we auto-include)
+                  .filter((u: any) => !s.meSessionId || String(u.id) !== String(s.meSessionId))
+                  .map((u: any) => {
+                    const id = String(u.id);
+                    const isPicked = !!picked[id];
+
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => toggle(id)}
+                        className={cx(
+                          "flex w-full items-center justify-between rounded-2xl border px-3 py-2 text-left text-sm",
+                          isPicked ? "border-purple-300 bg-purple-50" : "border-zinc-200 bg-white hover:bg-zinc-50"
+                        )}
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate text-[13px] font-semibold text-zinc-900">
+                            {u.nickname ?? "Anonymous"}
+                          </div>
+                          <div className="truncate text-[11px] text-zinc-500">{u.about ?? "—"}</div>
+                        </div>
+
+                        <div
+                          className={cx(
+                            "rounded-full px-2 py-1 text-[10px] font-bold",
+                            isPicked ? "bg-purple-700 text-white" : "bg-zinc-100 text-zinc-700"
+                          )}
+                        >
+                          {isPicked ? "Added" : "Add"}
+                        </div>
+                      </button>
+                    );
+                  })
               )}
+            </div>
+
+            {/* small helper */}
+            <div className="mt-2 text-[11px] text-zinc-500">
+              Selected: {Math.max(0, memberIds.length - (s.meSessionId ? 1 : 0))}
             </div>
           </div>
 
@@ -159,7 +249,13 @@ export default function CreateRoomModal({
             <button
               type="button"
               onClick={createRoom}
-              className="flex-1 rounded-2xl bg-gradient-to-r from-purple-700 to-fuchsia-600 px-4 py-3 text-sm font-semibold text-white hover:brightness-110"
+              disabled={!name.trim() || memberIds.length === 0}
+              className={cx(
+                "flex-1 rounded-2xl px-4 py-3 text-sm font-semibold text-white",
+                name.trim() && memberIds.length > 0
+                  ? "bg-gradient-to-r from-purple-700 to-fuchsia-600 hover:brightness-110"
+                  : "cursor-not-allowed bg-zinc-300"
+              )}
             >
               Create room
             </button>
