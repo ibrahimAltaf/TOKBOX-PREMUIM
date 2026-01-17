@@ -16,13 +16,8 @@ import {
   X,
 } from "lucide-react";
 
-import {
-  ensureSession,
-  deleteMe,
-  patchMe,
-} from "../../apis/sessions/sessions.api";
+import { ensureSession, deleteMe, patchMe } from "../../apis/sessions/sessions.api";
 import { uploadMedia } from "../../apis/media/media.api";
-import { toAbsoluteUrl } from "../../../lib/http";
 
 type MediaItem = { id: string; file: File; url: string };
 type Step = "idle" | "working" | "done" | "error";
@@ -32,13 +27,46 @@ const MAX_VIDEOS = 3;
 const MAX_IMAGE_MB = 8;
 const MAX_VIDEO_MB = 40;
 
-const cx = (...a: Array<string | false | undefined>) =>
-  a.filter(Boolean).join(" ");
+const cx = (...a: Array<string | false | undefined>) => a.filter(Boolean).join(" ");
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 const mb = (bytes: number) => bytes / (1024 * 1024);
 
-const BG_IMAGE =
-  "https://sendbird.imgix.net/cms/image2_2024-03-26-214252_jekb.png";
+const BG_IMAGE = "https://sendbird.imgix.net/cms/image2_2024-03-26-214252_jekb.png";
+
+// ✅ Prefer your backend base (uploads will be resolved against this when relative)
+const API_BASE =
+  (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/+$/, "") ||
+  (typeof window !== "undefined" ? window.location.origin : "");
+
+/**
+ * Normalize possibly-relative URL into a valid absolute URL.
+ * - trims
+ * - if relative => resolves against API_BASE
+ * - validates via URL()
+ */
+function normalizeUrl(input: any): string | null {
+  const raw = typeof input === "string" ? input.trim() : "";
+  if (!raw) return null;
+
+  try {
+    // already absolute
+    if (/^https?:\/\//i.test(raw)) {
+      return new URL(raw).toString();
+    }
+
+    // protocol-relative: //cdn.com/x
+    if (raw.startsWith("//")) {
+      return new URL("https:" + raw).toString();
+    }
+
+    // relative path: /uploads/x or uploads/x
+    const base = API_BASE || "http://localhost";
+    const withSlash = raw.startsWith("/") ? raw : `/${raw}`;
+    return new URL(withSlash, base).toString();
+  } catch {
+    return null;
+  }
+}
 
 export default function ProfileSetupPage() {
   const router = useRouter();
@@ -65,43 +93,44 @@ export default function ProfileSetupPage() {
   // permission modal
   const [permOpen, setPermOpen] = useState(false);
 
+  // ✅ avoid stale closure in cleanup
+  const avatarRef = useRef<MediaItem | null>(null);
+  const imagesRef = useRef<MediaItem[]>([]);
+  const videosRef = useRef<MediaItem[]>([]);
+
+  useEffect(() => {
+    avatarRef.current = avatar;
+  }, [avatar]);
+  useEffect(() => {
+    imagesRef.current = images;
+  }, [images]);
+  useEffect(() => {
+    videosRef.current = videos;
+  }, [videos]);
+
   const nicknameOk = nickname.trim().length >= 2;
 
-  /**
-   * ✅ INIT RULES (as you asked)
-   * - When user comes to this page: delete old session (best-effort).
-   * - DO NOT create a "guest" session.
-   * - Only create a new session if needed (cookie missing) by calling ensureSession() without forcing "guest".
-   */
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
       const t = toast.loading("Preparing session...");
       try {
-        // 1) always attempt to delete any previous session
+        // 1) best-effort delete any previous session
         try {
           await deleteMe();
         } catch {}
 
-        // 2) ensure there is an active session cookie if backend requires it
-        // If your backend returns ok false when no session exists,
-        // ensureSession will create one (anonymous) WITHOUT "guest" forcing.
+        // 2) ensure an active session cookie exists
         try {
           await ensureSession({
-            // IMPORTANT: do NOT force nickname "guest"
-            nickname: undefined as any,
-            about: undefined as any,
             fingerprint: `fp_${uid()}`,
-          });
-        } catch {
-          // if ensureSession is strict about schema, you can remove nickname/about entirely in your API layer
-        }
+          } as any);
+        } catch {}
 
         if (!cancelled) toast.success("Ready.", { id: t });
       } catch (e: any) {
-        if (!cancelled)
-          toast.error(e?.error?.message || "Session init failed.", { id: t });
+        if (!cancelled) toast.error(e?.error?.message || "Session init failed.", { id: t });
       }
     })();
 
@@ -109,12 +138,13 @@ export default function ProfileSetupPage() {
       cancelled = true;
 
       // cleanup object urls + stream
-      if (avatar) URL.revokeObjectURL(avatar.url);
-      images.forEach((m) => URL.revokeObjectURL(m.url));
-      videos.forEach((m) => URL.revokeObjectURL(m.url));
+      const a = avatarRef.current;
+      if (a) URL.revokeObjectURL(a.url);
+
+      imagesRef.current.forEach((m) => URL.revokeObjectURL(m.url));
+      videosRef.current.forEach((m) => URL.revokeObjectURL(m.url));
       stopPreview();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function pickAvatar(file?: File | null) {
@@ -127,15 +157,17 @@ export default function ProfileSetupPage() {
       toast.error(`Profile photo must be under ${MAX_IMAGE_MB}MB.`);
       return;
     }
-    if (avatar) URL.revokeObjectURL(avatar.url);
-    setAvatar({ id: uid(), file, url: URL.createObjectURL(file) });
+    if (avatarRef.current) URL.revokeObjectURL(avatarRef.current.url);
+
+    const next = { id: uid(), file, url: URL.createObjectURL(file) };
+    setAvatar(next);
     toast.success("Profile photo selected.");
   }
 
   function addImages(files: FileList | null) {
     if (!files) return;
 
-    const current = images.length;
+    const current = imagesRef.current.length;
     const roomLeft = Math.max(0, MAX_IMAGES - current);
     if (roomLeft === 0) {
       toast.error(`Max ${MAX_IMAGES} images allowed.`);
@@ -146,9 +178,7 @@ export default function ProfileSetupPage() {
     for (const f of Array.from(files).slice(0, roomLeft)) {
       if (!f.type.startsWith("image/")) continue;
       if (mb(f.size) > MAX_IMAGE_MB) {
-        toast.error(
-          `An image was too large (>${MAX_IMAGE_MB}MB) and was skipped.`
-        );
+        toast.error(`An image was too large (>${MAX_IMAGE_MB}MB) and was skipped.`);
         continue;
       }
       next.push({ id: uid(), file: f, url: URL.createObjectURL(f) });
@@ -162,7 +192,7 @@ export default function ProfileSetupPage() {
   function addVideos(files: FileList | null) {
     if (!files) return;
 
-    const current = videos.length;
+    const current = videosRef.current.length;
     const roomLeft = Math.max(0, MAX_VIDEOS - current);
     if (roomLeft === 0) {
       toast.error(`Max ${MAX_VIDEOS} videos allowed.`);
@@ -173,9 +203,7 @@ export default function ProfileSetupPage() {
     for (const f of Array.from(files).slice(0, roomLeft)) {
       if (!f.type.startsWith("video/")) continue;
       if (mb(f.size) > MAX_VIDEO_MB) {
-        toast.error(
-          `A video was too large (>${MAX_VIDEO_MB}MB) and was skipped.`
-        );
+        toast.error(`A video was too large (>${MAX_VIDEO_MB}MB) and was skipped.`);
         continue;
       }
       next.push({ id: uid(), file: f, url: URL.createObjectURL(f) });
@@ -207,8 +235,7 @@ export default function ProfileSetupPage() {
   async function enableLocation() {
     setLocationOn("working");
     try {
-      if (!("geolocation" in navigator))
-        throw new Error("Geolocation unsupported.");
+      if (!("geolocation" in navigator)) throw new Error("Geolocation unsupported.");
       await new Promise<void>((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(
           () => resolve(),
@@ -227,8 +254,7 @@ export default function ProfileSetupPage() {
   async function enableNotifications() {
     setNotifOn("working");
     try {
-      if (!("Notification" in window))
-        throw new Error("Notifications unsupported.");
+      if (!("Notification" in window)) throw new Error("Notifications unsupported.");
       const p = await Notification.requestPermission();
       if (p !== "granted") throw new Error("Denied");
       setNotifOn("done");
@@ -243,10 +269,7 @@ export default function ProfileSetupPage() {
     setCamOn("working");
     setMicOn("working");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       streamRef.current = stream;
 
       setCamOn("done");
@@ -274,7 +297,6 @@ export default function ProfileSetupPage() {
     if (camPreviewRef.current) camPreviewRef.current.srcObject = null;
   }
 
-  // ✅ SAVE + REDIRECT
   async function saveProfile() {
     if (!nicknameOk) {
       toast.error("Nickname is required (min 2 characters).");
@@ -285,16 +307,27 @@ export default function ProfileSetupPage() {
 
     try {
       // 1) Upload avatar (optional)
-      let avatarUrl: string | undefined;
+      let avatarUrl: string | null = null;
       let avatarMediaId: string | undefined;
 
-      if (avatar?.file) {
+      if (avatarRef.current?.file) {
         const up = await uploadMedia({
           folder: "profiles/avatar",
-          files: [avatar.file],
+          files: [avatarRef.current.file],
         });
+
         const f = up.files?.[0];
-        avatarUrl = toAbsoluteUrl(f?.url);
+        const normalized = normalizeUrl(f?.url);
+
+        if (!normalized) {
+          // 🔥 This prevents sending an invalid URL to backend
+          toast.error("Avatar upload returned invalid URL. Check upload response/base URL.", {
+            id: loadingId,
+          });
+          return;
+        }
+
+        avatarUrl = normalized;
         avatarMediaId = f?.id;
       }
 
@@ -302,72 +335,70 @@ export default function ProfileSetupPage() {
       let photos: string[] | undefined;
       let photoMediaIds: string[] | undefined;
 
-      if (images.length) {
+      if (imagesRef.current.length) {
         const up = await uploadMedia({
           folder: "profiles/photos",
-          files: images.map((x) => x.file),
+          files: imagesRef.current.map((x) => x.file),
         });
 
         photos = (up.files ?? [])
-          .map((x: any) => toAbsoluteUrl(x.url))
+          .map((x: any) => normalizeUrl(x.url))
           .filter(Boolean) as string[];
 
         photoMediaIds = (up.files ?? []).map((x: any) => x.id).filter(Boolean);
+
+        if (!photos.length) photos = undefined;
+        if (!photoMediaIds.length) photoMediaIds = undefined;
       }
 
       // 3) Upload intro video (optional: use first)
       let introVideoUrl: string | undefined;
       let introVideoMediaId: string | undefined;
 
-      if (videos.length) {
+      if (videosRef.current.length) {
         const up = await uploadMedia({
           folder: "profiles/videos",
-          files: [videos[0].file],
+          files: [videosRef.current[0].file],
         });
+
         const f = up.files?.[0];
-        introVideoUrl = toAbsoluteUrl(f?.url);
+        const normalized = normalizeUrl(f?.url);
+        if (normalized) introVideoUrl = normalized;
         introVideoMediaId = f?.id;
       }
 
       // 4) Patch session profile
-      await patchMe({
+      const payload: any = {
         nickname: nickname.trim(),
         about: bio.trim() || undefined,
+      };
 
-        ...(avatarUrl ? { avatarUrl } : {}),
-        ...(avatarMediaId ? { avatarMediaId } : {}),
+      if (avatarUrl) payload.avatarUrl = avatarUrl;
+      if (avatarMediaId) payload.avatarMediaId = avatarMediaId;
 
-        ...(photos?.length ? { photos } : {}),
-        ...(photoMediaIds?.length ? { photoMediaIds } : {}),
+      if (photos?.length) payload.photos = photos;
+      if (photoMediaIds?.length) payload.photoMediaIds = photoMediaIds;
 
-        ...(introVideoUrl ? { introVideoUrl } : {}),
-        ...(introVideoMediaId ? { introVideoMediaId } : {}),
-      });
+      if (introVideoUrl) payload.introVideoUrl = introVideoUrl;
+      if (introVideoMediaId) payload.introVideoMediaId = introVideoMediaId;
+
+      await patchMe(payload);
 
       toast.success("Profile saved ✅", { id: loadingId });
-
-      // ✅ redirect to chat
       router.replace("/chat");
     } catch (e: any) {
-      const msg = e?.error?.fieldErrors
-        ? JSON.stringify(e.error.fieldErrors)
-        : e?.error?.message || e?.message || "Failed to save.";
+      const msg =
+        e?.error?.fieldErrors
+          ? JSON.stringify(e.error.fieldErrors)
+          : e?.error?.message || e?.message || "Failed to save.";
       toast.error(msg, { id: loadingId });
     }
   }
 
   const summary = useMemo(() => {
     return [
-      {
-        label: "Location",
-        step: locationOn,
-        icon: <MapPin className="h-4 w-4" />,
-      },
-      {
-        label: "Notifications",
-        step: notifOn,
-        icon: <Bell className="h-4 w-4" />,
-      },
+      { label: "Location", step: locationOn, icon: <MapPin className="h-4 w-4" /> },
+      { label: "Notifications", step: notifOn, icon: <Bell className="h-4 w-4" /> },
       { label: "Camera", step: camOn, icon: <Camera className="h-4 w-4" /> },
       { label: "Microphone", step: micOn, icon: <Mic className="h-4 w-4" /> },
     ];
@@ -377,13 +408,7 @@ export default function ProfileSetupPage() {
     <div className="relative min-h-screen overflow-hidden bg-white text-zinc-900">
       {/* background */}
       <div className="absolute inset-0 -z-10">
-        <Image
-          src={BG_IMAGE}
-          alt="TokBox background"
-          fill
-          priority
-          className="object-cover"
-        />
+        <Image src={BG_IMAGE} alt="TokBox background" fill priority className="object-cover" />
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(168,85,247,0.35),rgba(255,255,255,0.70)_55%,rgba(255,255,255,0.96))]" />
         <div className="absolute inset-0 bg-gradient-to-b from-purple-900/30 via-white/35 to-white" />
         <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(168,85,247,0.08)_1px,transparent_1px),linear-gradient(to_bottom,rgba(168,85,247,0.08)_1px,transparent_1px)] bg-[size:72px_72px] opacity-40" />
@@ -393,9 +418,7 @@ export default function ProfileSetupPage() {
         <div className="flex items-end justify-between gap-4">
           <div>
             <div className="text-sm font-semibold text-purple-700">TokBox</div>
-            <h1 className="mt-1 text-2xl font-semibold tracking-tight">
-              Profile setup
-            </h1>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight">Profile setup</h1>
             <p className="mt-1 text-sm text-zinc-600">
               Add your nickname, bio and media. Permissions are optional.
             </p>
@@ -436,12 +459,7 @@ export default function ProfileSetupPage() {
                 <div className="flex items-center gap-4">
                   <div className="relative h-16 w-16 overflow-hidden rounded-2xl border border-purple-200 bg-purple-50">
                     {avatar ? (
-                      <Image
-                        src={avatar.url}
-                        alt="avatar"
-                        fill
-                        className="object-cover"
-                      />
+                      <Image src={avatar.url} alt="avatar" fill className="object-cover" />
                     ) : (
                       <div className="grid h-full w-full place-items-center text-xs font-semibold text-purple-700">
                         Photo
@@ -467,7 +485,8 @@ export default function ProfileSetupPage() {
                     <button
                       type="button"
                       onClick={() => {
-                        URL.revokeObjectURL(avatar.url);
+                        const a = avatarRef.current;
+                        if (a) URL.revokeObjectURL(a.url);
                         setAvatar(null);
                         toast.message("Profile photo removed.");
                       }}
@@ -478,9 +497,7 @@ export default function ProfileSetupPage() {
                     </button>
                   )}
                 </div>
-                <div className="mt-2 text-xs text-zinc-500">
-                  JPG/PNG • up to {MAX_IMAGE_MB}MB
-                </div>
+                <div className="mt-2 text-xs text-zinc-500">JPG/PNG • up to {MAX_IMAGE_MB}MB</div>
               </Field>
 
               <div className="grid gap-4 md:grid-cols-2">
@@ -499,11 +516,7 @@ export default function ProfileSetupPage() {
                       }}
                     />
                   </label>
-                  <ThumbGrid
-                    items={images}
-                    kind="image"
-                    onRemove={(id) => removeItem("images", id)}
-                  />
+                  <ThumbGrid items={images} kind="image" onRemove={(id) => removeItem("images", id)} />
                 </Field>
 
                 <Field label={`Videos (optional) • up to ${MAX_VIDEOS}`}>
@@ -521,11 +534,7 @@ export default function ProfileSetupPage() {
                       }}
                     />
                   </label>
-                  <ThumbGrid
-                    items={videos}
-                    kind="video"
-                    onRemove={(id) => removeItem("videos", id)}
-                  />
+                  <ThumbGrid items={videos} kind="video" onRemove={(id) => removeItem("videos", id)} />
                 </Field>
               </div>
 
@@ -558,9 +567,7 @@ export default function ProfileSetupPage() {
           {/* Right side */}
           <div className="grid gap-6">
             <div className="rounded-3xl border border-purple-200 bg-white/75 p-6 shadow-sm backdrop-blur">
-              <div className="text-sm font-semibold">
-                Privacy-friendly summary
-              </div>
+              <div className="text-sm font-semibold">Privacy-friendly summary</div>
               <div className="mt-1 text-xs text-zinc-500">
                 We don’t show raw coordinates in UI. Just whether it’s enabled.
               </div>
@@ -577,9 +584,7 @@ export default function ProfileSetupPage() {
                       </div>
                       <div>
                         <div className="text-sm font-semibold">{s.label}</div>
-                        <div className="mt-1 text-xs text-zinc-500">
-                          {stepText(s.step)}
-                        </div>
+                        <div className="mt-1 text-xs text-zinc-500">{stepText(s.step)}</div>
                       </div>
                     </div>
                     <StatusPill step={s.step} />
@@ -589,16 +594,9 @@ export default function ProfileSetupPage() {
             </div>
 
             <div className="rounded-3xl border border-purple-200 bg-white/75 p-6 shadow-sm backdrop-blur">
-              <div className="text-sm font-semibold">
-                Camera preview (optional)
-              </div>
+              <div className="text-sm font-semibold">Camera preview (optional)</div>
               <div className="mt-3 overflow-hidden rounded-2xl border border-purple-200 bg-black">
-                <video
-                  ref={camPreviewRef}
-                  playsInline
-                  muted
-                  className="h-44 w-full object-cover"
-                />
+                <video ref={camPreviewRef} playsInline muted className="h-44 w-full object-cover" />
               </div>
               <div className="mt-3 flex gap-2">
                 <button
@@ -684,13 +682,7 @@ export default function ProfileSetupPage() {
 
 /* ---------------- UI helpers ---------------- */
 
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
       <div className="text-xs font-semibold text-zinc-700">{label}</div>
@@ -704,32 +696,15 @@ function StatusPill({ step }: { step: Step }) {
     "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-semibold";
   if (step === "done")
     return (
-      <span
-        className={cx(
-          base,
-          "border-emerald-200 bg-emerald-50 text-emerald-700"
-        )}
-      >
+      <span className={cx(base, "border-emerald-200 bg-emerald-50 text-emerald-700")}>
         <Check className="h-3.5 w-3.5" /> Enabled
       </span>
     );
   if (step === "working")
-    return (
-      <span className={cx(base, "border-amber-200 bg-amber-50 text-amber-700")}>
-        Working…
-      </span>
-    );
+    return <span className={cx(base, "border-amber-200 bg-amber-50 text-amber-700")}>Working…</span>;
   if (step === "error")
-    return (
-      <span className={cx(base, "border-rose-200 bg-rose-50 text-rose-700")}>
-        Not allowed
-      </span>
-    );
-  return (
-    <span className={cx(base, "border-zinc-200 bg-zinc-50 text-zinc-700")}>
-      Optional
-    </span>
-  );
+    return <span className={cx(base, "border-rose-200 bg-rose-50 text-rose-700")}>Not allowed</span>;
+  return <span className={cx(base, "border-zinc-200 bg-zinc-50 text-zinc-700")}>Optional</span>;
 }
 
 function stepText(step: Step) {
@@ -779,8 +754,7 @@ function ThumbGrid({
   kind: "image" | "video";
   onRemove: (id: string) => void;
 }) {
-  if (!items.length)
-    return <div className="mt-3 text-xs text-zinc-500">Nothing added.</div>;
+  if (!items.length) return <div className="mt-3 text-xs text-zinc-500">Nothing added.</div>;
 
   return (
     <div className="mt-3 grid grid-cols-3 gap-2">
@@ -792,12 +766,7 @@ function ThumbGrid({
           {kind === "image" ? (
             <Image src={m.url} alt="preview" fill className="object-cover" />
           ) : (
-            <video
-              src={m.url}
-              className="h-full w-full object-cover"
-              muted
-              playsInline
-            />
+            <video src={m.url} className="h-full w-full object-cover" muted playsInline />
           )}
 
           <button

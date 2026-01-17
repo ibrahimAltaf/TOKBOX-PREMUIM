@@ -1,81 +1,98 @@
 "use client";
 
 import Image from "next/image";
-import { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Film, Image as ImgIcon } from "lucide-react";
+import { getSelectedUser, setChatState, subscribeChat } from "../store/chat.store";
+import { toAbsoluteUrl } from "@/lib/http";
+import MediaLightbox from "./modals/MediaLightbox";
 
-type Tab = "photos" | "movies";
+type Tab = "photos" | "videos";
 
-const cx = (...a: Array<string | false | undefined>) =>
-  a.filter(Boolean).join(" ");
-
-const PHOTOS = [
-  "https://images.unsplash.com/photo-1520975958225-3f61d1f2f7f0?auto=format&fit=crop&w=900&q=60",
-  "https://images.unsplash.com/photo-1520975693411-b2e8f2c7a41a?auto=format&fit=crop&w=900&q=60",
-  "https://images.unsplash.com/photo-1545239351-1141bd82e8a6?auto=format&fit=crop&w=900&q=60",
-  "https://images.unsplash.com/photo-1520975958225-3f61d1f2f7f0?auto=format&fit=crop&w=900&q=60",
-  "https://images.unsplash.com/photo-1545239351-1141bd82e8a6?auto=format&fit=crop&w=900&q=60",
-  "https://images.unsplash.com/photo-1520975693411-b2e8f2c7a41a?auto=format&fit=crop&w=900&q=60",
-];
-
-const MOVIES = [
-  "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
-  "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
-  "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
-];
+const cx = (...a: Array<string | false | undefined>) => a.filter(Boolean).join(" ");
 
 export default function MediaGrid() {
+  const [, bump] = useState(0);
+
+  useEffect(() => {
+    return subscribeChat(() => bump((x) => x + 1));
+  }, []);
+
+  const u = getSelectedUser();
   const [tab, setTab] = useState<Tab>("photos");
-  const items = useMemo(() => (tab === "photos" ? PHOTOS : MOVIES), [tab]);
+
+  const [lightbox, setLightbox] = useState<{ open: boolean; src: string | null; kind: "image" | "video" }>({
+    open: false,
+    src: null,
+    kind: "image",
+  });
+
+  const photos = useMemo(() => (u?.photos ?? []).map((x) => toAbsoluteUrl(x)).filter(Boolean), [u?.photos]);
+
+  const videos = useMemo(() => {
+    const v = u?.introVideoUrl ? [toAbsoluteUrl(u.introVideoUrl)] : [];
+    return v.filter(Boolean);
+  }, [u?.introVideoUrl]);
+
+  if (!u) {
+    return (
+      <div className="rounded-2xl border border-zinc-200 bg-white p-3 text-xs text-zinc-600">
+        Select a user to view their media.
+      </div>
+    );
+  }
+
+  const items = tab === "photos" ? photos : videos;
 
   return (
-    <div className="h-full">
-      {/* Tabs */}
-      <div className="mb-3 flex items-center gap-2 rounded-2xl border border-purple-200 bg-white p-1">
-        <TabBtn
-          active={tab === "photos"}
-          onClick={() => setTab("photos")}
-          icon={<ImgIcon className="h-4 w-4" />}
-          label="Photos"
-        />
-        <TabBtn
-          active={tab === "movies"}
-          onClick={() => setTab("movies")}
-          icon={<Film className="h-4 w-4" />}
-          label="Movies"
-        />
+    <>
+      <div className="h-full">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="text-sm font-semibold text-zinc-900">Media</div>
+          <div className="text-xs text-zinc-500">{u.nickname ?? "Anonymous"}</div>
+        </div>
+
+        <div className="mb-3 flex items-center gap-2 rounded-2xl border border-purple-200 bg-white p-1">
+          <TabBtn active={tab === "photos"} onClick={() => setTab("photos")} icon={<ImgIcon className="h-4 w-4" />} label="Photos" />
+          <TabBtn active={tab === "videos"} onClick={() => setTab("videos")} icon={<Film className="h-4 w-4" />} label="Videos" />
+        </div>
+
+        {items.length === 0 ? (
+          <div className="rounded-2xl border border-zinc-200 bg-white p-3 text-xs text-zinc-600">
+            No {tab} uploaded.
+          </div>
+        ) : tab === "photos" ? (
+          <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+            {items.map((src, i) => (
+              <button
+                key={src + i}
+                type="button"
+                className="relative aspect-square overflow-hidden rounded-2xl border border-purple-200 bg-white"
+                onClick={() => setLightbox({ open: true, src, kind: "image" })}
+                title="Open"
+              >
+                <Image src={src} alt="photo" fill className="object-cover" unoptimized />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-3">
+            {items.map((src, i) => (
+              <button
+                key={src + i}
+                type="button"
+                onClick={() => setLightbox({ open: true, src, kind: "video" })}
+                className="overflow-hidden rounded-2xl border border-purple-200 bg-black"
+              >
+                <video src={src} playsInline className="h-[260px] w-full object-cover" />
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* Content */}
-      {tab === "photos" ? (
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
-          {items.map((src, i) => (
-            <div
-              key={src + i}
-              className="relative aspect-square overflow-hidden rounded-2xl border border-purple-200 bg-white"
-            >
-              <Image src={src} alt="photo" fill className="object-cover" />
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-          {items.map((src, i) => (
-            <div
-              key={src + i}
-              className="overflow-hidden rounded-2xl border border-purple-200 bg-black"
-            >
-              <video
-                src={src}
-                controls
-                playsInline
-                className="h-[170px] w-full object-cover"
-              />
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+      <MediaLightbox open={lightbox.open} src={lightbox.src} kind={lightbox.kind} onClose={() => setLightbox({ open: false, src: null, kind: "image" })} />
+    </>
   );
 }
 

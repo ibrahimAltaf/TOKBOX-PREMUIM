@@ -1,6 +1,21 @@
 // src/apis/dm/dm.api.ts
 import { fetchJson } from "@/lib/http";
 
+export type DmThread = {
+  id: string;
+  peerSessionId?: string;
+};
+
+export type DmMessage = {
+  id: string;
+  text?: string;
+  fromSessionId?: string;
+  ts?: number;
+  createdAt?: string;
+  mediaUrls?: string[];
+  mediaIds?: string[];
+};
+
 export async function openDmThread(targetSessionId: string) {
   return fetchJson<any>("/dm/threads", {
     method: "POST",
@@ -8,10 +23,7 @@ export async function openDmThread(targetSessionId: string) {
   });
 }
 
-export async function listDmThreads(args?: {
-  limit?: number;
-  cursor?: string;
-}) {
+export async function listDmThreads(args?: { limit?: number; cursor?: string }) {
   const p = new URLSearchParams();
   if (args?.limit) p.set("limit", String(args.limit));
   if (args?.cursor) p.set("cursor", args.cursor);

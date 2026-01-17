@@ -1,3 +1,4 @@
+// src/apis/sessions/sessions.socket.api.ts
 "use client";
 
 import { fetchJson } from "@/lib/http";

@@ -20,7 +20,7 @@ export async function uploadMedia(args: {
 
   const res = await fetch(`${API_BASE}/media/upload`, {
     method: "POST",
-    credentials: "include", // ✅ cookie session required
+    credentials: "include",
     body: fd,
   });
 

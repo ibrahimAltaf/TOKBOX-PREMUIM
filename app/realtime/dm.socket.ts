@@ -3,10 +3,12 @@
 
 import { connectSocket } from "./socket.client";
 
-export function dmOpen(targetSessionId: string) {
+type Ack = unknown;
+
+export function dmOpen(targetSessionId: string): Promise<Ack> {
   const s = connectSocket();
-  return new Promise<any>((resolve) => {
-    s.emit("dm:open", { targetSessionId }, (res) => resolve(res));
+  return new Promise<Ack>((resolve) => {
+    s.emit("dm:open", { targetSessionId }, (res: Ack) => resolve(res));
   });
 }
 
@@ -15,9 +17,9 @@ export function dmSend(args: {
   text?: string;
   mediaUrls?: string[];
   mediaIds?: string[];
-}) {
+}): Promise<Ack> {
   const s = connectSocket();
-  return new Promise<any>((resolve) => {
+  return new Promise<Ack>((resolve) => {
     s.emit(
       "dm:send",
       {
@@ -26,13 +28,13 @@ export function dmSend(args: {
         mediaUrls: args.mediaUrls,
         mediaIds: args.mediaIds,
       },
-      (res) => resolve(res)
+      (res: Ack) => resolve(res)
     );
   });
 }
 
 export function onDmNew(
-  handler: (payload: { threadId: string; message: any }) => void
+  handler: (payload: { threadId: string; message: unknown }) => void
 ) {
   const s = connectSocket();
   s.on("dm:new", handler);

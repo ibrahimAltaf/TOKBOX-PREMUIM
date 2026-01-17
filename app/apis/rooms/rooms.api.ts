@@ -1,3 +1,4 @@
+// src/apis/rooms/rooms.api.ts
 import { fetchJson } from "@/lib/http";
 
 export type RoomType = "PUBLIC" | "PRIVATE" | "VIDEO_GROUP" | "VIDEO_1ON1";
@@ -51,11 +52,11 @@ export async function deleteRoom(id: string) {
 }
 
 export async function joinRoom(roomId: string) {
-  return fetchJson<any>(`/rooms/${roomId}/join`, { method: "POST" });
+  return fetchJson<any>(`/rooms/${roomId}/join`, { method: "POST", body: {} });
 }
 
 export async function leaveRoom(roomId: string) {
-  return fetchJson<any>(`/rooms/${roomId}/leave`, { method: "POST" });
+  return fetchJson<any>(`/rooms/${roomId}/leave`, { method: "POST", body: {} });
 }
 
 export async function listRoomMembers(roomId: string, limit = 100) {

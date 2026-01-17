@@ -17,6 +17,7 @@ export type OnlineUser = {
   geoLabel?: string;
   avatarUrl?: string;
   photos?: string[];
+  introVideoUrl?: string;
   online?: boolean;
   lastSeenAt?: string;
 };
@@ -28,42 +29,72 @@ export type Notif = {
   kind: "DM" | "ROOM" | "CALL" | "INVITE" | "SYSTEM";
   title: string;
   body?: string;
-  key?: string; // threadId or roomId (optional)
+  key?: string; // threadId or roomId or callId
+};
+
+export type Room = {
+  id: string;
+  name?: string;
+  memberIds?: string[];
+};
+
+export type RoomInvite = {
+  id: string;
+  roomId: string;
+  roomName?: string;
+  fromSessionId?: string;
+  ts: number;
+};
+
+export type ActiveCall = {
+  callId: string;
+  peerSessionId: string;
+  kind: "audio" | "video";
+  direction: "in" | "out";
+};
+
+export type OutgoingCall = {
+  callId: string;
+  toSessionId: string;
+  kind: "audio" | "video";
 };
 
 export type ChatState = {
-  // identity
   meSessionId: string | null;
 
-  // navigation
   mode: Mode;
   activeThreadId: string | null;
   activePeerId: string | null;
   activeRoomId: string | null;
 
-  // data (NEW canonical names used by ChatBox)
   onlineUsers: OnlineUser[];
   dmMessagesByThread: Record<string, Msg[]>;
   roomMessagesByRoom: Record<string, Msg[]>;
 
-  // typing/presence
   typingByRoom: Record<string, Record<string, boolean>>;
   presenceByRoom: Record<string, string[]>;
 
-  // notifications
   notifs: Notif[];
 
-  // profile panel selection
   selectedUserId: string | null;
 
-  // calling
   incomingCall: null | {
     callId: string;
     fromSessionId: string;
+    kind?: "audio" | "video";
     roomId?: string | null;
   };
 
-  // ---- Backward compat aliases (so old components don't break)
+  outgoingCall: OutgoingCall | null;
+  activeCall: ActiveCall | null;
+
+  favUserIds: string[];
+  blockedUserIds: string[];
+
+  rooms: Room[];
+  roomInvites: RoomInvite[];
+
+  // Back-compat aliases (kept)
   dmByThread: Record<string, Msg[]>;
   roomByRoom: Record<string, Msg[]>;
 };
@@ -88,8 +119,15 @@ let state: ChatState = {
   selectedUserId: null,
 
   incomingCall: null,
+  outgoingCall: null,
+  activeCall: null,
 
-  // aliases
+  favUserIds: [],
+  blockedUserIds: [],
+
+  rooms: [],
+  roomInvites: [],
+
   dmByThread: {},
   roomByRoom: {},
 };
@@ -104,14 +142,7 @@ export function getChatState() {
   return state;
 }
 
-export function subscribeChat(fn: (s: ChatState) => void) {
-  subs.add(fn);
-  fn(state);
-  return () => subs.delete(fn);
-}
-
 function syncAliases(next: ChatState): ChatState {
-  // keep alias maps in sync for any older code
   next.dmByThread = next.dmMessagesByThread;
   next.roomByRoom = next.roomMessagesByRoom;
   return next;
@@ -128,12 +159,19 @@ export function setChatState(
 function mapMsg(m: any): Msg {
   const idRaw = m?.id ?? m?._id ?? null;
 
-  const fallback =
-    String(m?.fromSessionId ?? m?.authorSessionId ?? m?.sessionId ?? "na") +
-    ":" +
-    String(m?.ts ?? (m?.createdAt ? Date.parse(m.createdAt) : Date.now())) +
-    ":" +
-    String(m?.text ?? m?.body ?? "");
+  const ts =
+    m?.ts != null
+      ? Number(m.ts)
+      : m?.createdAt
+      ? Date.parse(m.createdAt)
+      : Date.now();
+
+  const fromSessionId =
+    m?.fromSessionId ?? m?.authorSessionId ?? m?.sessionId ?? m?.from;
+
+  const fallback = `${String(fromSessionId ?? "na")}:${String(ts)}:${String(
+    m?.text ?? m?.body ?? ""
+  )}`;
 
   const id = String(idRaw ?? fallback);
 
@@ -143,8 +181,8 @@ function mapMsg(m: any): Msg {
   return {
     id,
     text: String(m?.text ?? m?.body ?? ""),
-    ts: Number(m?.ts ?? (m?.createdAt ? Date.parse(m.createdAt) : Date.now())),
-    fromSessionId: m?.fromSessionId ?? m?.authorSessionId ?? m?.sessionId,
+    ts,
+    fromSessionId: fromSessionId ? String(fromSessionId) : undefined,
     mediaUrls,
     mediaIds,
   };
@@ -204,7 +242,6 @@ export function pushNotif(n: Omit<Notif, "id"> & { id?: string }) {
   };
 
   setChatState((st) => {
-    // avoid duplicates
     if (st.notifs.some((x) => x.id === full.id)) return {};
     return { notifs: [full, ...st.notifs].slice(0, 200) };
   });
@@ -214,6 +251,43 @@ export function markAllNotifsRead() {
   setChatState((st) => ({
     notifs: st.notifs.map((n) => ({ ...n, read: true })),
   }));
+}
+
+// ---------------- Rooms ----------------
+
+export function upsertRooms(list: Room[]) {
+  setChatState((st) => {
+    const map = new Map<string, Room>();
+    (st.rooms ?? []).forEach((r) => map.set(String(r.id), r));
+    list.forEach((r) => map.set(String(r.id), r));
+    return { rooms: Array.from(map.values()) };
+  });
+}
+
+export function pushRoomInvite(inv: Omit<RoomInvite, "id"> & { id?: string }) {
+  const full: RoomInvite = {
+    id:
+      inv.id ??
+      `invite:${inv.roomId}:${inv.fromSessionId ?? "na"}:${inv.ts ?? Date.now()}`,
+    roomId: String(inv.roomId),
+    roomName: inv.roomName,
+    fromSessionId: inv.fromSessionId,
+    ts: inv.ts ?? Date.now(),
+  };
+
+  setChatState((st) => {
+    if ((st.roomInvites ?? []).some((x) => x.id === full.id)) return {};
+    return { roomInvites: [full, ...(st.roomInvites ?? [])].slice(0, 100) };
+  });
+
+  pushNotif({
+    kind: "INVITE",
+    ts: full.ts,
+    read: false,
+    title: "Room invite",
+    body: full.roomName ? `Invite to: ${full.roomName}` : `Invite to room: ${full.roomId}`,
+    key: full.roomId,
+  });
 }
 
 // ---------------- Profile selection ----------------
@@ -229,4 +303,17 @@ export function getSelectedUser() {
     st.onlineUsers.find((u) => String(u.id) === String(st.selectedUserId)) ??
     null
   );
+}
+
+export function subscribeChat(fn: (s: ChatState) => void) {
+  subs.add(fn);
+
+  try {
+    fn(state);
+  } catch {}
+
+  // cleanup
+  return () => {
+    subs.delete(fn);
+  };
 }

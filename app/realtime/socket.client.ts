@@ -6,13 +6,13 @@ import {
   getChatState,
   pushDmMessage,
   pushRoomMessage,
+  pushNotif,
   setChatState,
 } from "../store/chat.store";
 
 let sock: Socket | null = null;
 let bound = false;
 
-// ✅ session key cache (cookie fallback + explicit key)
 let socketSessionKey: string | null = null;
 
 function playTone() {
@@ -40,10 +40,8 @@ function browserNotify(title: string, body?: string) {
 
 function shouldAlert(kind: "DM" | "ROOM", key: string) {
   const s = getChatState();
-  if (kind === "DM" && s.mode === "DM" && s.activeThreadId === key)
-    return false;
-  if (kind === "ROOM" && s.mode === "ROOM" && s.activeRoomId === key)
-    return false;
+  if (kind === "DM" && s.mode === "DM" && s.activeThreadId === key) return false;
+  if (kind === "ROOM" && s.mode === "ROOM" && s.activeRoomId === key) return false;
   return true;
 }
 
@@ -51,18 +49,31 @@ function bindOnce(s: Socket) {
   if (bound) return;
   bound = true;
 
-  s.on("connect", () => {
-    // useful for debugging
-    // console.log("[socket] connected", s.id);
-  });
+  s.on("connect", () => {});
 
   s.on("connect_error", (err: any) => {
     // console.log("[socket] connect_error", err?.message || err);
+    pushNotif({
+      kind: "SYSTEM",
+      title: "Socket error",
+      body: String(err?.message || "connect_error"),
+      read: false,
+      ts: Date.now(),
+    });
   });
 
   s.on("dm:new", ({ threadId, message }) => {
     const tid = String(threadId);
     pushDmMessage(tid, message);
+
+    pushNotif({
+      kind: "DM",
+      title: "New DM",
+      body: String(message?.text || "New message"),
+      key: tid,
+      read: false,
+      ts: Date.now(),
+    });
 
     if (shouldAlert("DM", tid)) {
       playTone();
@@ -73,6 +84,15 @@ function bindOnce(s: Socket) {
   s.on("msg:new", ({ roomId, message }) => {
     const rid = String(roomId);
     pushRoomMessage(rid, message);
+
+    pushNotif({
+      kind: "ROOM",
+      title: "New room message",
+      body: String(message?.text || "New message"),
+      key: rid,
+      read: false,
+      ts: Date.now(),
+    });
 
     if (shouldAlert("ROOM", rid)) {
       playTone();
@@ -101,29 +121,76 @@ function bindOnce(s: Socket) {
   // calling
   s.on("call:ring", ({ callId, fromSessionId, roomId }) => {
     setChatState({ incomingCall: { callId, fromSessionId, roomId } });
+
+    pushNotif({
+      kind: "CALL",
+      title: "Incoming call",
+      body: `From ${String(fromSessionId).slice(0, 6)}`,
+      key: String(callId),
+      read: false,
+      ts: Date.now(),
+    });
+
     playTone();
     browserNotify("Incoming call", `From ${String(fromSessionId).slice(0, 6)}`);
   });
 
-  s.on("call:ended", ({ callId }) => {
+  s.on("call:ended", ({ callId, reason }) => {
     setChatState((st) => {
       if (st.incomingCall?.callId === callId) return { incomingCall: null };
       return {};
     });
+
+    pushNotif({
+      kind: "CALL",
+      title: "Call ended",
+      body: String(reason || "ended"),
+      key: String(callId),
+      read: false,
+      ts: Date.now(),
+    });
+  });
+
+  // invites (optional UI later)
+  s.on("invite:new", (payload: any) => {
+    pushNotif({
+      kind: "INVITE",
+      title: "New invite",
+      body: payload?.kind ? `Invite: ${payload.kind}` : "Invite received",
+      key: payload?.token ? String(payload.token) : undefined,
+      read: false,
+      ts: Date.now(),
+    });
+  });
+
+  s.on("invite:accepted", (payload: any) => {
+    pushNotif({
+      kind: "INVITE",
+      title: "Invite accepted",
+      body: payload?.kind ? `Accepted: ${payload.kind}` : "Invite accepted",
+      key: payload?.token ? String(payload.token) : undefined,
+      read: false,
+      ts: Date.now(),
+    });
+  });
+
+  s.on("invite:revoked", (payload: any) => {
+    pushNotif({
+      kind: "INVITE",
+      title: "Invite revoked",
+      body: payload?.token ? `Token: ${payload.token}` : "Invite revoked",
+      key: payload?.token ? String(payload.token) : undefined,
+      read: false,
+      ts: Date.now(),
+    });
   });
 }
 
-/**
- * ✅ Allow app to set sessionKey for socket auth
- * You can call this after `getSocketAuthKey()` API.
- */
 export function setSocketSessionKey(key: string | null | undefined) {
   socketSessionKey = key ? String(key) : null;
 
-  // If socket already exists, update auth and reconnect
   if (sock) {
     try {
-      // socket.io supports updating auth before reconnect
       sock.auth = { ...(sock.auth as any), sessionKey: socketSessionKey };
       sock.disconnect();
       sock.connect();
@@ -131,22 +198,17 @@ export function setSocketSessionKey(key: string | null | undefined) {
   }
 }
 
-/**
- * Create and return socket singleton (connects if needed)
- */
 export function connectSocket(): Socket {
   if (sock) return sock;
 
   const url =
-    process.env.NEXT_PUBLIC_SOCKET_URL ||
-    process.env.NEXT_PUBLIC_API_URL ||
-    "https://tokbox.nl";
+    process.env.NEXT_PUBLIC_SOCKET_URL?.trim() ||
+    process.env.NEXT_PUBLIC_API_URL?.trim() ||
+    "http://localhost:8080";
 
   sock = io(url, {
     transports: ["websocket"],
     withCredentials: true,
-
-    // ✅ send key (backend can read from socket.handshake.auth.sessionKey)
     auth: socketSessionKey ? { sessionKey: socketSessionKey } : undefined,
   });
 
