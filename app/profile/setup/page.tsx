@@ -441,7 +441,7 @@ export default function ProfileSetupPage() {
                 <input
                   value={nickname}
                   onChange={(e) => setNickname(e.target.value)}
-                  placeholder="e.g. IbrahimAltaf"
+                  placeholder="e.g. Nick Name"
                   className="h-12 w-full rounded-2xl border border-purple-200 bg-white px-4 text-sm outline-none placeholder:text-zinc-400 focus:border-purple-400"
                 />
               </Field>

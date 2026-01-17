@@ -5,13 +5,13 @@ const nextConfig = {
       // ✅ Backend API (production)
       {
         source: "/api/:path*",
-        destination: "http://localhost:8080/:path*",
+        destination: "https://tokbox.nl/:path*",
       },
 
       // ✅ uploads proxy (IMPORTANT)
       {
         source: "/uploads/:path*",
-        destination: "http://localhost:8080/uploads/:path*",
+        destination: "https://tokbox.nl/uploads/:path*",
       },
     ];
   },

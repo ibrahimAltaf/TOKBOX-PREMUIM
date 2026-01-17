@@ -6,10 +6,10 @@
  * - NEXT_PUBLIC_APP_URL is optional, used only if you want absolute URLs for uploads
  */
 export const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim() || "http://localhost:8080";
+  process.env.NEXT_PUBLIC_API_URL?.trim() || "https://tokbox.nl";
 
 export const APP_BASE =
-  process.env.NEXT_PUBLIC_APP_URL?.trim() || "http://localhost:8080";
+  process.env.NEXT_PUBLIC_APP_URL?.trim() || "https://tokbox.nl";
 
 /**
  * Convert ANY backend upload URL to either:

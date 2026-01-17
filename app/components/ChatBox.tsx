@@ -22,6 +22,8 @@ import {
   getChatState,
   setChatState,
   markAllNotifsRead,
+  pushDmMessage,
+  pushRoomMessage,
 } from "../store/chat.store";
 
 import { listDmMessages, sendDmMessage, openDmThread } from "../apis/dm/dm.api";
@@ -40,6 +42,55 @@ function isVideoUrl(u: string) {
   return /\.(mp4|webm|mov)(\?|$)/i.test(u);
 }
 
+function mapApiMsg(m: any) {
+  return {
+    id: String(m?.id ?? m?._id ?? ""),
+    text: m?.text ?? "",
+    ts: m?.ts ? Number(m.ts) : m?.createdAt ? Date.parse(m.createdAt) : Date.now(),
+    fromSessionId:
+      m?.fromSessionId ??
+      m?.senderSessionId ??
+      m?.authorSessionId ??
+      m?.sessionId ??
+      m?.from ??
+      null,
+    mediaUrls: (m?.mediaUrls ?? []).map((u: string) => toAbsoluteUrl(u)).filter(Boolean),
+    mediaIds: (m?.mediaIds ?? []).filter(Boolean),
+  };
+}
+
+function emitWithAck<T = any>(
+  sock: ReturnType<typeof connectSocket> | null,
+  event: string,
+  payload: any,
+  timeoutMs = 1500
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    if (!sock) return reject(new Error("NO_SOCKET"));
+
+    let done = false;
+    const t = setTimeout(() => {
+      if (done) return;
+      done = true;
+      reject(new Error("ACK_TIMEOUT"));
+    }, timeoutMs);
+
+    try {
+      sock.emit(event as any, payload, (res: any) => {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        resolve(res);
+      });
+    } catch (e: any) {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      reject(e);
+    }
+  });
+}
+
 export default function ChatBox() {
   const [tab, setTab] = useState<TopTab>("chat");
   const [s, setS] = useState(getChatState());
@@ -53,14 +104,20 @@ export default function ChatBox() {
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  const [lightbox, setLightbox] = useState<{ open: boolean; src: string | null; kind: "image" | "video" }>({
-    open: false,
-    src: null,
-    kind: "image",
-  });
+  const [lightbox, setLightbox] = useState<{
+    open: boolean;
+    src: string | null;
+    kind: "image" | "video";
+  }>({ open: false, src: null, kind: "image" });
+
+  const sockRef = useRef<ReturnType<typeof connectSocket> | null>(null);
+
+  useEffect(() => subscribeChat((next) => setS(next)), []);
 
   useEffect(() => {
-    return subscribeChat((next) => setS(next));
+    try {
+      sockRef.current = connectSocket();
+    } catch {}
   }, []);
 
   const peer = useMemo(() => {
@@ -98,7 +155,6 @@ export default function ChatBox() {
   const stAny: any = s as any;
   const blocked = (stAny.blockedUserIds ?? []) as string[];
   const isBlocked = s.mode === "DM" && s.activePeerId ? blocked.includes(String(s.activePeerId)) : false;
-
   const canSend = text.trim().length > 0 && !isBlocked;
 
   useEffect(() => {
@@ -107,30 +163,36 @@ export default function ChatBox() {
     el.scrollTop = el.scrollHeight;
   }, [msgs.length]);
 
+  // Subscribe/join based on your backend events
+  useEffect(() => {
+    const sock = sockRef.current;
+    if (!sock) return;
+
+    if (s.mode === "ROOM" && s.activeRoomId) {
+      try {
+        sock.emit("room:join", { roomId: s.activeRoomId });
+      } catch {}
+      return;
+    }
+
+    if (s.mode === "DM" && s.activePeerId) {
+      // This is critical: backend only pushes dm:new to subscribed users (usually)
+      try {
+        sock.emit("dm:open", { targetSessionId: s.activePeerId });
+      } catch {}
+    }
+  }, [s.mode, s.activeRoomId, s.activePeerId]);
+
+  // Load messages on selection change (API load once)
   useEffect(() => {
     let dead = false;
 
     async function load() {
       try {
-        connectSocket();
-
-        if (s.mode === "DM" && s.activePeerId) {
-          try {
-            connectSocket().emit("dm:open", { targetSessionId: s.activePeerId });
-          } catch {}
-        }
-
         if (s.mode === "DM" && s.activeThreadId) {
           const res: any = await listDmMessages(s.activeThreadId, { limit: 50 });
           if (dead) return;
-
-          const arr = (res?.messages ?? res?.data?.messages ?? []).map((m: any) => ({
-            id: String(m?.id ?? m?._id),
-            text: m?.text ?? "",
-            ts: m?.ts ? Number(m.ts) : m?.createdAt ? Date.parse(m.createdAt) : Date.now(),
-            fromSessionId: m?.fromSessionId ?? m?.authorSessionId ?? m?.sessionId,
-            mediaUrls: (m?.mediaUrls ?? []).map((u: string) => toAbsoluteUrl(u)).filter(Boolean),
-          }));
+          const arr = (res?.messages ?? res?.data?.messages ?? []).map(mapApiMsg);
 
           setChatState((st: any) => ({
             dmMessagesByThread: { ...(st.dmMessagesByThread ?? {}), [s.activeThreadId!]: arr },
@@ -140,22 +202,11 @@ export default function ChatBox() {
         if (s.mode === "ROOM" && s.activeRoomId) {
           const res: any = await listRoomMessages(s.activeRoomId, { limit: 50 });
           if (dead) return;
-
-          const arr = (res?.messages ?? res?.data?.messages ?? []).map((m: any) => ({
-            id: String(m?.id ?? m?._id),
-            text: m?.text ?? "",
-            ts: m?.ts ? Number(m.ts) : m?.createdAt ? Date.parse(m.createdAt) : Date.now(),
-            fromSessionId: m?.fromSessionId ?? m?.authorSessionId ?? m?.sessionId,
-            mediaUrls: (m?.mediaUrls ?? []).map((u: string) => toAbsoluteUrl(u)).filter(Boolean),
-          }));
+          const arr = (res?.messages ?? res?.data?.messages ?? []).map(mapApiMsg);
 
           setChatState((st: any) => ({
             roomMessagesByRoom: { ...(st.roomMessagesByRoom ?? {}), [s.activeRoomId!]: arr },
           }));
-
-          try {
-            connectSocket().emit("room:join", { roomId: s.activeRoomId });
-          } catch {}
         }
       } catch {}
     }
@@ -164,25 +215,28 @@ export default function ChatBox() {
     return () => {
       dead = true;
     };
-  }, [s.mode, s.activeThreadId, s.activePeerId, s.activeRoomId]);
+  }, [s.mode, s.activeThreadId, s.activeRoomId]);
 
+  // Typing (ROOM only)
   useEffect(() => {
     if (s.mode !== "ROOM" || !s.activeRoomId) return;
+    const sock = sockRef.current;
+    if (!sock) return;
 
     if (!text) {
       try {
-        connectSocket().emit("typing:stop", { roomId: s.activeRoomId });
+        sock.emit("typing:stop", { roomId: s.activeRoomId });
       } catch {}
       return;
     }
 
     try {
-      connectSocket().emit("typing:start", { roomId: s.activeRoomId });
+      sock.emit("typing:start", { roomId: s.activeRoomId });
     } catch {}
 
     const t = setTimeout(() => {
       try {
-        connectSocket().emit("typing:stop", { roomId: s.activeRoomId! });
+        sock.emit("typing:stop", { roomId: s.activeRoomId! });
       } catch {}
     }, 900);
 
@@ -193,10 +247,8 @@ export default function ChatBox() {
     if (!files || files.length === 0) return { mediaUrls: [] as string[], mediaIds: [] as string[] };
 
     const up = await uploadMedia({ folder, files: Array.from(files) });
-
     const urls = (up.files ?? []).map((f: any) => toAbsoluteUrl(f.url)).filter(Boolean) as string[];
     const ids = (up.files ?? []).map((f: any) => f.id).filter(Boolean) as string[];
-
     return { mediaUrls: urls, mediaIds: ids };
   }
 
@@ -223,8 +275,9 @@ export default function ChatBox() {
       activeRoomId: null,
     } as any);
 
+    // subscribe immediately so FIRST incoming message is realtime
     try {
-      connectSocket().emit("dm:open", { targetSessionId: s.activePeerId });
+      sockRef.current?.emit("dm:open", { targetSessionId: s.activePeerId });
     } catch {}
 
     return String(threadId);
@@ -233,15 +286,29 @@ export default function ChatBox() {
   async function sendNow(payload: { text?: string; mediaUrls?: string[]; mediaIds?: string[] }) {
     if (isBlocked) return;
 
+    const sock = sockRef.current;
+
     if (s.mode === "DM") {
       const tid = await ensureDmThread();
       if (!tid) return;
 
+      // socket first (ACK), API only if ACK fails/timeout
       try {
-        connectSocket().emit("dm:send", { threadId: tid, ...payload });
-      } catch {
+        const ack: any = await emitWithAck(sock, "dm:send", { threadId: tid, ...payload }, 1800);
+
+        // If your backend returns message in ACK, you can push immediately (optional)
+        if (ack?.message) pushDmMessage(tid, mapApiMsg(ack.message));
+
+        if (ack?.ok) {
+          setText("");
+          setEmojiOpen(false);
+          return;
+        }
+      } catch {}
+
+      try {
         await sendDmMessage(tid, payload);
-      }
+      } catch {}
 
       setText("");
       setEmojiOpen(false);
@@ -251,10 +318,20 @@ export default function ChatBox() {
     if (!s.activeRoomId) return;
 
     try {
-      connectSocket().emit("msg:send", { roomId: s.activeRoomId, ...payload });
-    } catch {
+      const ack: any = await emitWithAck(sock, "msg:send", { roomId: s.activeRoomId, ...payload }, 1800);
+
+      if (ack?.message) pushRoomMessage(s.activeRoomId, mapApiMsg(ack.message));
+
+      if (ack?.ok) {
+        setText("");
+        setEmojiOpen(false);
+        return;
+      }
+    } catch {}
+
+    try {
       await sendRoomMessage(s.activeRoomId, payload);
-    }
+    } catch {}
 
     setText("");
     setEmojiOpen(false);
@@ -380,18 +457,21 @@ export default function ChatBox() {
 
                       const t = new Date(Number(m.ts ?? Date.now())).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
+                      // WhatsApp-like rule (DM):
+                      // - Incoming: show peer avatar (receiver)
+                      // - Outgoing: no avatar bubble
+                      const showDmAvatar = s.mode === "DM" && !mine;
+
                       return (
-                        <div key={m.id} className={cx("flex", mine ? "justify-end" : "justify-start")}>
+                        <div key={String(m.id ?? m.ts)} className={cx("flex", mine ? "justify-end" : "justify-start")}>
                           <div className={cx("flex max-w-[82%] items-end gap-2", mine ? "flex-row-reverse" : "flex-row")}>
-                            {!mine && s.mode === "DM" && (
+                            {showDmAvatar && (
                               <div className="relative h-7 w-7 overflow-hidden rounded-full border border-zinc-200 bg-zinc-100">
                                 {peerImg ? <Image src={peerImg} alt="avatar" fill className="object-cover" unoptimized /> : null}
                               </div>
                             )}
 
-                            {/* WhatsApp-like bubble */}
                             <div className={cx("relative rounded-2xl px-3 py-2 text-[14px] leading-5 shadow-sm", mine ? "bg-purple-600 text-white" : "bg-white text-zinc-900 border border-zinc-200")}>
-                              {/* Tail */}
                               <span
                                 className={cx(
                                   "absolute bottom-2 h-3 w-3 rotate-45",
@@ -424,7 +504,6 @@ export default function ChatBox() {
                                 </div>
                               )}
 
-                              {/* Time bottom-right like WhatsApp */}
                               <div className={cx("absolute bottom-1 right-2 text-[10px]", mine ? "text-white/80" : "text-zinc-500")}>{t}</div>
                             </div>
                           </div>

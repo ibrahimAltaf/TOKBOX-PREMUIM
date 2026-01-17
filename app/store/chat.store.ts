@@ -1,4 +1,3 @@
-// app/store/chat.store.ts
 type Mode = "DM" | "ROOM";
 
 export type Msg = {
@@ -29,7 +28,7 @@ export type Notif = {
   kind: "DM" | "ROOM" | "CALL" | "INVITE" | "SYSTEM";
   title: string;
   body?: string;
-  key?: string; // threadId or roomId or callId
+  key?: string;
 };
 
 export type Room = {
@@ -94,7 +93,7 @@ export type ChatState = {
   rooms: Room[];
   roomInvites: RoomInvite[];
 
-  // Back-compat aliases (kept)
+  // aliases (legacy)
   dmByThread: Record<string, Msg[]>;
   roomByRoom: Record<string, Msg[]>;
 };
@@ -149,7 +148,9 @@ function syncAliases(next: ChatState): ChatState {
 }
 
 export function setChatState(
-  patch: Partial<ChatState> | ((s: ChatState) => Partial<ChatState>)
+  patch:
+    | Partial<ChatState>
+    | ((s: ChatState) => Partial<ChatState>)
 ) {
   const nextPatch = typeof patch === "function" ? patch(state) : patch;
   state = syncAliases({ ...state, ...nextPatch });
@@ -167,11 +168,17 @@ function mapMsg(m: any): Msg {
       : Date.now();
 
   const fromSessionId =
-    m?.fromSessionId ?? m?.authorSessionId ?? m?.sessionId ?? m?.from;
+    m?.fromSessionId ??
+    m?.senderSessionId ??
+    m?.authorSessionId ??
+    m?.sessionId ??
+    m?.from ??
+    null;
 
-  const fallback = `${String(fromSessionId ?? "na")}:${String(ts)}:${String(
-    m?.text ?? m?.body ?? ""
-  )}`;
+  const text = String(m?.text ?? m?.body ?? "");
+
+  // stable fallback id (same on all clients)
+  const fallback = `${String(fromSessionId ?? "na")}:${String(ts)}:${text}`;
 
   const id = String(idRaw ?? fallback);
 
@@ -180,7 +187,7 @@ function mapMsg(m: any): Msg {
 
   return {
     id,
-    text: String(m?.text ?? m?.body ?? ""),
+    text,
     ts,
     fromSessionId: fromSessionId ? String(fromSessionId) : undefined,
     mediaUrls,
@@ -219,8 +226,6 @@ export function pushRoomMessage(roomId: string, raw: any) {
   });
 }
 
-// ---------------- Notifications ----------------
-
 function notifId(n: Partial<Notif>) {
   return (
     n.id ??
@@ -253,8 +258,6 @@ export function markAllNotifsRead() {
   }));
 }
 
-// ---------------- Rooms ----------------
-
 export function upsertRooms(list: Room[]) {
   setChatState((st) => {
     const map = new Map<string, Room>();
@@ -268,7 +271,9 @@ export function pushRoomInvite(inv: Omit<RoomInvite, "id"> & { id?: string }) {
   const full: RoomInvite = {
     id:
       inv.id ??
-      `invite:${inv.roomId}:${inv.fromSessionId ?? "na"}:${inv.ts ?? Date.now()}`,
+      `invite:${inv.roomId}:${inv.fromSessionId ?? "na"}:${
+        inv.ts ?? Date.now()
+      }`,
     roomId: String(inv.roomId),
     roomName: inv.roomName,
     fromSessionId: inv.fromSessionId,
@@ -285,12 +290,12 @@ export function pushRoomInvite(inv: Omit<RoomInvite, "id"> & { id?: string }) {
     ts: full.ts,
     read: false,
     title: "Room invite",
-    body: full.roomName ? `Invite to: ${full.roomName}` : `Invite to room: ${full.roomId}`,
+    body: full.roomName
+      ? `Invite to: ${full.roomName}`
+      : `Invite to room: ${full.roomId}`,
     key: full.roomId,
   });
 }
-
-// ---------------- Profile selection ----------------
 
 export function selectUser(userId: string | null) {
   setChatState({ selectedUserId: userId });
@@ -312,7 +317,6 @@ export function subscribeChat(fn: (s: ChatState) => void) {
     fn(state);
   } catch {}
 
-  // cleanup
   return () => {
     subs.delete(fn);
   };
